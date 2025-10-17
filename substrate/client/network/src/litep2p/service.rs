@@ -264,11 +264,17 @@ impl NetworkSigner for Litep2pNetworkService {
 		signature: &Vec<u8>,
 		message: &Vec<u8>,
 	) -> Result<bool, String> {
-		let public_key = litep2p::crypto::PublicKey::from_protobuf_encoding(&public_key)
+		let public_key = litep2p::crypto::RemotePublicKey::from_protobuf_encoding(&public_key)
 			.map_err(|error| error.to_string())?;
 		let peer: litep2p::PeerId = peer.into();
 
-		Ok(peer == public_key.to_peer_id() && public_key.verify(message, signature))
+        let peer_id_from_key = match &public_key {
+            litep2p::crypto::RemotePublicKey::Ed25519(pk) => pk.to_peer_id(),
+            #[allow(unreachable_patterns)]
+            _ => return Err("unsupported key type for peer id".to_string())
+        };
+
+        Ok(peer == peer_id_from_key && public_key.verify(message, signature))
 	}
 }
 

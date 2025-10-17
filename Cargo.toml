@@ -1439,7 +1439,7 @@ time = { version = "0.3" }
 tiny-keccak = { version = "2.0.2" }
 tokio = { version = "1.45.0", default-features = false }
 tokio-retry = { version = "0.3.0" }
-tokio-stream = { version = "0.1.14" }
+tokio-stream = { version = "0.1.17" }
 tokio-test = { version = "0.4.4" }
 tokio-tungstenite = { version = "0.26.2" }
 tokio-util = { version = "0.7.8" }
@@ -1575,3 +1575,6 @@ wasmi = { opt-level = 3 }
 x25519-dalek = { opt-level = 3 }
 yamux = { opt-level = 3 }
 zeroize = { opt-level = 3 }
+
+[patch.crates-io]
+litep2p = { git = "https://github.com/xDimon/litep2p.git", rev = "e44ab69084ff04f15a34b73866dbeeeac9ff06ec" }
