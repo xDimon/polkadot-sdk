@@ -3,21 +3,6 @@
 
 set -euo pipefail
 
-POLKADOT_BIN="/home/di/Projects/polkadot-sdk/target/testnet/polkadot"
-COLLATOR_BIN="/home/di/Projects/polkadot-sdk/target/testnet/polkadot-parachain"
-SUBKEY_BIN="/home/di/.cargo/bin/subkey"
-LOGCFG="info"
-
-
-# cargo build -p staging-chain-spec-builder --bin chain-spec-builder
-
-
-
-
-RELAYCHAIN="rococo-local"
-PARACHAIN="asset-hub-rococo-local"
-PARA_BASE=2000
-
 # Debug toggle and helper
 : "${DEBUG:=0}"
 dbg() {
@@ -43,6 +28,14 @@ re='^[0-8]$'
 [[ "$PARACHAINS"  =~ $re ]] || { echo "PARACHAINS must be 0..8"; exit 1; }
 [[ "$COLLATORS"   =~ $re ]] || { echo "COLLATORS must be 0..8";  exit 1; }
 
+canonical_path() {
+  local p="$1"
+  # Use command substitution; resolve dirname with a subshell, then append the basename
+  # Works on macOS/BSD and Linux; avoids GNU-specific realpath flags
+  (cd "$(dirname -- "$p")" >/dev/null 2>&1 && printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$p")")
+}
+WORKDIR="$(canonical_path "$WORKDIR")"
+
 if [ "${RMTMP:-0}" -eq "1" -a -e "$WORKDIR"  ]; then
   echo "Previous WORKDIR '$WORKDIR' was removed." >&2
   rm -Rf "$WORKDIR"
@@ -57,7 +50,161 @@ mkdir -p -- "$WORKDIR"
 
 dbg "WORKDIR $WORKDIR created"
 
+POLKADOT_REPO="$HOME/Projects/polkadot"
+RELAYCHAIN="rococo-local"
+PARA_BASE=2000
+LOGCFG="info"
+
+
+# cd polkadot-sdk
+# cargo build --profile testnet --features x-shadow,fast-runtime -p polkadot -p polkadot-parachain-bin
+# cargo build --release -p staging-chain-spec-builder --bin chain-spec-builder
+# cargo build --release -p glutton-westend-runtime
+# cp -a target/release/wbuild/glutton-westend-runtime/glutton_westend_runtime.compact.compressed.wasm ./
+# cargo install subxt-cli
+# cargo install subkey
+
+POLKADOT_BIN="$POLKADOT_REPO/target/testnet/polkadot"
+if [[ -f "$POLKADOT_BIN" ]]; then
+  POLKADOT_BIN="$(realpath "$POLKADOT_BIN")"
+elif ! POLKADOT_BIN="$(command -v "polkadot" 2>/dev/null)"; then
+  echo "polkadot - not found; trying to build"
+  cd $POLKADOT_REPO
+  cargo build --profile testnet --features x-shadow -p polkadot
+  PATH_BAK=$PATH
+  PATH="$POLKADOT_REPO/target/testnet/:$PATH"
+  if ! POLKADOT_BIN="$(command -v "polkadot" 2>/dev/null)"; then
+    echo "polkadot - is not built"
+    exit 1
+  fi
+  PATH=$PATH_BAK
+fi
+echo "polkadot - found: $POLKADOT_BIN"
+
+COLLATOR_BIN="$POLKADOT_REPO/target/testnet/polkadot-parachain"
+if [[ -f "$COLLATOR_BIN" ]]; then
+  COLLATOR_BIN="$(realpath "$COLLATOR_BIN")"
+elif ! COLLATOR_BIN="$(command -v "polkadot-parachain" 2>/dev/null)"; then
+  echo "polkadot-parachain - not found; trying to build"
+  cd $POLKADOT_REPO
+  cargo build --profile testnet -p polkadot-parachain-bin
+  PATH_BAK=$PATH
+  PATH="$POLKADOT_REPO/target/testnet/:$PATH"
+  if ! COLLATOR_BIN="$(command -v "polkadot-parachain" 2>/dev/null)"; then
+    echo "polkadot-parachain - is not built"
+    exit 1
+  fi
+  PATH=$PATH_BAK
+fi
+echo "polkadot-parachain - found: $COLLATOR_BIN"
+
+SPEC_BUILDER_BIN="$POLKADOT_REPO/target/testnet/chain-spec-builder"
+if [[ -f "$SPEC_BUILDER_BIN" ]]; then
+  SPEC_BUILDER_BIN="$(realpath "$SPEC_BUILDER_BIN")"
+elif ! SPEC_BUILDER_BIN="$(command -v "chain-spec-builder" 2>/dev/null)"; then
+  echo "chain-spec-builder - not found; trying to build"
+  cd $POLKADOT_REPO
+  cargo build --profile testnet -p staging-chain-spec-builder --bin chain-spec-builder
+  PATH_BAK=$PATH
+  PATH="$POLKADOT_REPO/target/testnet/:$PATH"
+  if ! SPEC_BUILDER_BIN="$(command -v "chain-spec-builder" 2>/dev/null)"; then
+    echo "chain-spec-builder - is not built"
+    exit 1
+  fi
+  PATH=$PATH_BAK
+  cd -
+fi
+echo "chain-spec-builder - found: $SPEC_BUILDER_BIN"
+
+if ! SUBKEY_BIN="$(command -v "subkey" 2>/dev/null)"; then
+  echo "subkey - not found; trying to install"
+  cargo install subkey
+  PATH_BAK=$PATH
+  PATH="$HOME/.cargo/bin/:$PATH"
+  if ! SUBKEY_BIN="$(command -v "subkey" 2>/dev/null)"; then
+    echo "subkey - is not installed"
+    exit 1
+  fi
+  PATH=$PATH_BAK
+fi
+echo "subkey - found: $SUBKEY_BIN"
+
+if ! SUBXT_BIN="$(command -v "subxt" 2>/dev/null)"; then
+  echo "subxt - not found; trying to install"
+  cargo install subxt-cli
+  PATH_BAK=$PATH
+  PATH="$HOME/.cargo/bin/:$PATH"
+  if ! SUBKEY_BIN="$(command -v "subxt" 2>/dev/null)"; then
+    echo "subxt - is not installed"
+    exit 1
+  fi
+  PATH=$PATH_BAK
+fi
+echo "subxt - found: $SUBXT_BIN"
+
+RUNTIME_WASM="$POLKADOT_REPO/target/release/wbuild/glutton-westend-runtime/glutton_westend_runtime.compact.compressed.wasm"
+if [[ -f "$RUNTIME_WASM" ]]; then
+  RUNTIME_WASM="$(realpath "$RUNTIME_WASM")"
+else
+  echo "glutton_westend_runtime - not found; trying to build"
+  cd $POLKADOT_REPO
+  cargo build --release -p glutton-westend-runtime
+  RUNTIME_WASM="$(realpath target/release/wbuild/glutton-westend-runtime/glutton_westend_runtime.compact.compressed.wasm)"
+  if ! [[ -f "$RUNTIME_WASM" ]]; then
+    echo "glutton_westend_runtime - is not built"
+    exit 1
+  fi
+  cd -
+fi
+echo "glutton_westend_runtime - found: $RUNTIME_WASM"
+
+RELAY_SPEC_TMPL="relaychain-template.json"
+if [[ -f "$RELAY_SPEC_TMPL" ]]; then
+  RELAY_SPEC_TMPL="$(realpath "$RELAY_SPEC_TMPL")"
+else
+  echo "relaychain spec template - not found; trying to build"
+  "$POLKADOT_BIN" build-spec \
+    --chain "$RELAYCHAIN" \
+    --disable-default-bootnode  > relaychain-template.json 2>/dev/null
+
+  RELAY_SPEC_TMPL="$(realpath relaychain-template.json)"
+  if ! [[ -f "$RELAY_SPEC_TMPL" ]]; then
+    echo "relaychain spec template - is not built"
+    exit 1
+  fi
+fi
+echo "relaychain spec template - found: $RELAY_SPEC_TMPL"
+
+PARA_SPEC_TMPL="parachain-template.json"
+if [[ -f "$PARA_SPEC_TMPL" ]]; then
+  PARA_SPEC_TMPL="$(realpath "$PARA_SPEC_TMPL")"
+else
+  echo "parachain spec template - not found; trying to build"
+  "$SPEC_BUILDER_BIN" create \
+    -t local \
+    --chain-name Parachain_1234 \
+    --chain-id para1234 \
+    --relay-chain $RELAYCHAIN \
+    --para-id 1234 \
+    --runtime $RUNTIME_WASM \
+    named-preset local_testnet
+  mv chain_spec.json parachain-template.json
+
+  PARA_SPEC_TMPL="$(realpath parachain-template.json)"
+  if ! [[ -f "$PARA_SPEC_TMPL" ]]; then
+    echo "parachain spec template - is not built"
+    exit 1
+  fi
+fi
+echo "parachain spec template - found: $PARA_SPEC_TMPL"
+
+
+
+
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+
+
 
 # clean
 # Deletes only intermediate artifacts under $WORKDIR, keeping manifests/keys, *-raw.json, and shadow.yaml.
@@ -78,16 +225,16 @@ clean() {
   local patterns=(
     "$WORKDIR/paras.json"
     "$WORKDIR/tmp.*"
-    "$WORKDIR/${RELAYCHAIN}.json"
-    "$WORKDIR/${RELAYCHAIN}-no-code.json"
-    "$WORKDIR/${RELAYCHAIN}-val.json"
-    "$WORKDIR/${RELAYCHAIN}-val-no-code.json"
-    "$WORKDIR/${RELAYCHAIN}-val-paras.json"
-    "$WORKDIR/${RELAYCHAIN}-val-paras-no-code.json"
-    "$WORKDIR/${PARACHAIN}.json"
-    "$WORKDIR/${PARACHAIN}-no-code.json"
-    "$WORKDIR/${PARACHAIN}-"[0-9]*".json"
-    "$WORKDIR/${PARACHAIN}-"[0-9]*"-no-code.json"
+    "$WORKDIR/relaychain.json"
+    "$WORKDIR/relaychain-no-code.json"
+    "$WORKDIR/relaychain-val.json"
+    "$WORKDIR/relaychain-val-no-code.json"
+    "$WORKDIR/relaychain-val-paras.json"
+    "$WORKDIR/relaychain-val-paras-no-code.json"
+    "$WORKDIR/parachain.json"
+    "$WORKDIR/parachain-no-code.json"
+    "$WORKDIR/parachain-"[0-9]*".json"
+    "$WORKDIR/parachain-"[0-9]*"-no-code.json"
     "$WORKDIR/para-"[0-9]*"-genesis"
     "$WORKDIR/para-"[0-9]*"-wasm"
   )
@@ -316,6 +463,33 @@ clean_dev_validators_patch() {
     .genesis.runtimeGenesis.patch.session.keys = [] |
     .genesis.runtimeGenesis.patch.balances = (.genesis.runtimeGenesis.patch.balances // {}) |
     .genesis.runtimeGenesis.patch.balances.balances = [] |
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch | has("staking")))
+      then
+        .genesis.runtimeGenesis.patch.staking = (
+          .genesis.runtimeGenesis.patch.staking
+          | .forceEra = "NotForcing"
+          | .invulnerables = []
+          | .minimumValidatorCount = 1
+          | .slashRewardFraction = 100000000
+          | .stakers = []
+          | .validatorCount = 0
+        )
+      else . end
+    ) |
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.config? // null) != null
+          and (.genesis.runtimeGenesis.config.aura? // null) != null
+          and (.genesis.runtimeGenesis.config.aura | has("authorities")))
+      then
+        .genesis.runtimeGenesis.config.aura.authorities = []
+      else . end
+    ) |
     .bootNodes = []
   ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
   echo "Validator session keys, balances, and bootNodes cleared in $spec_path"
@@ -332,26 +506,112 @@ clean_dev_collators_patch() {
   local tmp_out
   tmp_out="$(mktemp "$WORKDIR/tmp.cleanpara.XXXXXX")"
   jq --argjson pid "$para_id" '
+    .id = ("para" + ($pid|tostring)) |
+    .name = ("Parachain_" + ($pid|tostring)) |
     .para_id = $pid |
     .genesis = (.genesis // {}) |
     .genesis.runtimeGenesis = (.genesis.runtimeGenesis // {}) |
     .genesis.runtimeGenesis.patch = (.genesis.runtimeGenesis.patch // {}) |
-    .genesis.runtimeGenesis.patch.parachainInfo = (
-      .genesis.runtimeGenesis.patch.parachainInfo // {}
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch.parachainInfo? // null) != null
+          and (.genesis.runtimeGenesis.patch.parachainInfo | has("parachainId")))
+      then
+        .genesis.runtimeGenesis.patch.parachainInfo.parachainId = $pid
+      else . end
     ) |
-    .genesis.runtimeGenesis.patch.parachainInfo.parachainId = $pid |
-    .genesis.runtimeGenesis.patch.collatorSelection = (
-      .genesis.runtimeGenesis.patch.collatorSelection // {}
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch.sudo? // null) != null
+          and (.genesis.runtimeGenesis.patch.sudo | has("key")))
+      then
+        .genesis.runtimeGenesis.patch.sudo.key = null
+      else . end
     ) |
-    .genesis.runtimeGenesis.patch.collatorSelection.invulnerables = [] |
-    .genesis.runtimeGenesis.patch.balances = (
-      .genesis.runtimeGenesis.patch.balances // {}
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.config? // null) != null
+          and (.genesis.runtimeGenesis.config.parachainInfo? // null) != null
+          and (.genesis.runtimeGenesis.config.parachainInfo | has("parachainId")))
+      then
+        .genesis.runtimeGenesis.config.parachainInfo.parachainId = $pid
+      else . end
     ) |
-    .genesis.runtimeGenesis.patch.balances.balances = [] |
-    .genesis.runtimeGenesis.patch.session = (
-      .genesis.runtimeGenesis.patch.session // {}
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch.collatorSelection? // null) != null
+          and (.genesis.runtimeGenesis.patch.collatorSelection | has("invulnerables")))
+      then
+        .genesis.runtimeGenesis.patch.collatorSelection.invulnerables = []
+      else . end
     ) |
-    .genesis.runtimeGenesis.patch.session.keys = []
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch.aura? // null) != null
+          and (.genesis.runtimeGenesis.patch.aura | has("authorities")))
+      then
+        .genesis.runtimeGenesis.patch.aura.authorities = []
+      else . end
+    ) |
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.config? // null) != null
+          and (.genesis.runtimeGenesis.config.collatorSelection? // null) != null
+          and (.genesis.runtimeGenesis.config.collatorSelection | has("invulnerables")))
+      then
+        .genesis.runtimeGenesis.config.collatorSelection.invulnerables = []
+      else . end
+    ) |
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.config? // null) != null
+          and (.genesis.runtimeGenesis.config.balances? // null) != null
+          and (.genesis.runtimeGenesis.config.balances | has("balances")))
+      then
+        .genesis.runtimeGenesis.config.balances.balances = []
+      else . end
+    ) |
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.config? // null) != null
+          and (.genesis.runtimeGenesis.config.aura? // null) != null
+          and (.genesis.runtimeGenesis.config.aura | has("authorities")))
+      then
+        .genesis.runtimeGenesis.config.aura.authorities = []
+      else . end
+    ) |
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch.balances? // null) != null
+          and (.genesis.runtimeGenesis.patch.balances | has("balances")))
+      then
+        .genesis.runtimeGenesis.patch.balances.balances = []
+      else . end
+    ) |
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch.session? // null) != null
+          and (.genesis.runtimeGenesis.patch.session | has("keys")))
+      then
+        .genesis.runtimeGenesis.patch.session.keys = []
+      else . end
+    )
   ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
   echo "Parachain patch cleaned and para_id set to $para_id in $spec_path"
 }
@@ -449,6 +709,33 @@ add_dev_validators_patch() {
         + [[$controller, $amt_controller], [$stash, $amt_stash]]
       )
     ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+
+    # Add/update staking for the validator (controller acts as both stash and controller)
+    local amount_bonded_default="100000000000000"
+    tmp_out="$(mktemp "$WORKDIR/tmp.addval.XXXXXX")"
+    jq --arg controller "$controller_ss58" \
+       --argjson amt_bonded "$amount_bonded_default" '
+      (
+        if ((.genesis? // null) != null
+            and (.genesis.runtimeGenesis? // null) != null
+            and (.genesis.runtimeGenesis.patch? // null) != null
+            and (.genesis.runtimeGenesis.patch | has("staking")))
+        then
+          .genesis.runtimeGenesis.patch.staking = (
+            .genesis.runtimeGenesis.patch.staking
+            | .forceEra = "NotForcing"
+            | .minimumValidatorCount = (.minimumValidatorCount // 1)
+            | .slashRewardFraction = (.slashRewardFraction // 100000000)
+            | .invulnerables = (((.invulnerables // []) + [$controller]) | unique)
+            | .stakers = ((.stakers // [])
+                | map(select(.[0] != $controller))
+                + [[ $controller, $controller, $amt_bonded, "Validator" ]])
+            | .validatorCount = ((.invulnerables // []) | length)
+          )
+        else . end
+      )
+    ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+
     # Append bootNode
     local listen_address peer_id bootnode
     listen_address="$(jq -r '.listen_address' "$manifest")"
@@ -480,34 +767,162 @@ add_dev_collators_patch() {
   aura_ss58="$(jq -r '.session_keys[]|select(.type=="aura")|.ss58' "$manifest")"
   if [ -z "$controller_ss58" ] || [ -z "$aura_ss58" ]; then
     echo "add_dev_collators_patch: Missing controller/aura ss58 in manifest for $collator_name" >&2; return 1; fi
+  # Check if this is the first collator being added
+  local is_first
+  is_first="$(jq -r '((.genesis.runtimeGenesis.patch.session.keys // []) | length) == 0' "$spec_path")"
   # Build session key entry with only Aura for parachain
   local entry
   entry="$(jq -cn --arg acc "$controller_ss58" --arg aura "$aura_ss58" '[ $acc, $acc, { aura: $aura } ]')"
   tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
   jq --argjson new_entry "$entry" --arg acc "$controller_ss58" '
-    .genesis = (.genesis // {}) |
-    .genesis.runtimeGenesis = (.genesis.runtimeGenesis // {}) |
-    .genesis.runtimeGenesis.patch = (.genesis.runtimeGenesis.patch // {}) |
-    .genesis.runtimeGenesis.patch.session = (.genesis.runtimeGenesis.patch.session // {}) |
-    .genesis.runtimeGenesis.patch.session.keys = (
-      (.genesis.runtimeGenesis.patch.session.keys // [])
-      | map(select(.[0] != $acc))
-      + [$new_entry]
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch.session? // null) != null
+          and (.genesis.runtimeGenesis.patch.session | has("keys")))
+      then
+        .genesis.runtimeGenesis.patch.session.keys = (
+          (.genesis.runtimeGenesis.patch.session.keys // [])
+          | map(select(.[0] != $acc))
+          + [$new_entry]
+        )
+      else . end
     )
   ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+
+  # If patch.aura.authorities exists, add the collator aura there (unique)
+  tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
+  jq --arg aura "$aura_ss58" '
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch.aura? // null) != null
+          and (.genesis.runtimeGenesis.patch.aura | has("authorities")))
+      then
+        .genesis.runtimeGenesis.patch.aura.authorities = (
+          ((.genesis.runtimeGenesis.patch.aura.authorities // [])
+            | map(select(. != $aura)))
+          + [$aura]
+        )
+      else . end
+    )
+  ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+
+  # If this is the first collator being added, set Sudo key to its controller address, and mirror to config.sudo.key if it exists
+  if [ "$is_first" = "true" ]; then
+    tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
+    jq --arg controller "$controller_ss58" '
+      (
+        if ((.genesis? // null) != null
+            and (.genesis.runtimeGenesis? // null) != null
+            and (.genesis.runtimeGenesis.patch? // null) != null
+            and (.genesis.runtimeGenesis.patch.sudo? // null) != null
+            and (.genesis.runtimeGenesis.patch.sudo | has("key")))
+        then
+          .genesis.runtimeGenesis.patch.sudo.key = $controller
+        else . end
+      ) |
+      (
+        if ((.genesis? // null) != null
+            and (.genesis.runtimeGenesis? // null) != null
+            and (.genesis.runtimeGenesis.config? // null) != null
+            and (.genesis.runtimeGenesis.config.sudo? // null) != null
+            and (.genesis.runtimeGenesis.config.sudo | has("key")))
+        then
+          .genesis.runtimeGenesis.config.sudo.key = $controller
+        else . end
+      )
+    ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+    echo "Parachain Sudo key set to controller of $collator_name"
+  fi
 
   # Ensure collator is invulnerable
   tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
   jq --arg acc "$controller_ss58" '
-    .genesis = (.genesis // {}) |
-    .genesis.runtimeGenesis = (.genesis.runtimeGenesis // {}) |
-    .genesis.runtimeGenesis.patch = (.genesis.runtimeGenesis.patch // {}) |
-    .genesis.runtimeGenesis.patch.collatorSelection = (
-      .genesis.runtimeGenesis.patch.collatorSelection // {}
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch.collatorSelection? // null) != null
+          and (.genesis.runtimeGenesis.patch.collatorSelection | has("invulnerables")))
+      then
+        .genesis.runtimeGenesis.patch.collatorSelection.invulnerables = (
+          ((.genesis.runtimeGenesis.patch.collatorSelection.invulnerables // []) + [$acc]) | unique
+        )
+      else . end
+    )
+  ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+
+  # Fund collator controller in balances
+  local amount_collator_default="1000000000000000000"
+  tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
+  jq --arg controller "$controller_ss58" \
+     --argjson amt "$amount_collator_default" '
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch.balances? // null) != null
+          and (.genesis.runtimeGenesis.patch.balances | has("balances")))
+      then
+        .genesis.runtimeGenesis.patch.balances.balances = (
+          (.genesis.runtimeGenesis.patch.balances.balances // [])
+          | map(select(.[0] != $controller))
+          + [[ $controller, $amt ]]
+        )
+      else . end
     ) |
-    .genesis.runtimeGenesis.patch.collatorSelection.invulnerables = (
-      ((.genesis.runtimeGenesis.patch.collatorSelection.invulnerables // []) + [$acc])
-      | unique
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.config? // null) != null
+          and (.genesis.runtimeGenesis.config.balances? // null) != null
+          and (.genesis.runtimeGenesis.config.balances | has("balances")))
+      then
+        .genesis.runtimeGenesis.config.balances.balances = (
+          ((.genesis.runtimeGenesis.config.balances.balances // [])
+            | map(select(.[0] != $controller)))
+          + [[ $controller, $amt ]]
+        )
+      else . end
+    )
+  ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+
+  # Sync config.aura.authorities if present (do not create branches)
+  tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
+  jq --arg aura "$aura_ss58" '
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.config? // null) != null
+          and (.genesis.runtimeGenesis.config.aura? // null) != null
+          and (.genesis.runtimeGenesis.config.aura | has("authorities")))
+      then
+        .genesis.runtimeGenesis.config.aura.authorities = (
+          ((.genesis.runtimeGenesis.config.aura.authorities // [])
+            | map(select(. != $aura)))
+          + [$aura]
+        )
+      else . end
+    )
+  ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+
+  # Sync config.collatorSelection.invulnerables if present (do not create branches)
+  tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
+  jq --arg acc "$controller_ss58" '
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.config? // null) != null
+          and (.genesis.runtimeGenesis.config.collatorSelection? // null) != null
+          and (.genesis.runtimeGenesis.config.collatorSelection | has("invulnerables")))
+      then
+        .genesis.runtimeGenesis.config.collatorSelection.invulnerables = (
+          ((.genesis.runtimeGenesis.config.collatorSelection.invulnerables // []) + [$acc]) | unique
+        )
+      else . end
     )
   ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
 
@@ -528,7 +943,7 @@ add_dev_collators_patch() {
 
 
 # replace_runtime_code <INPUT_SPEC.json> <OUTPUT_SPEC.json> [HEX_CODE]
-# Writes HEX_CODE (default: 0xdeadcode) into .genesis.runtimeGenesis.code
+# Writes HEX_CODE (default: 0xdeadcode) into .genesis.runtimeGenesis.code, .genesis.raw.top["0x3a636f6465"], and .genesis.runtimeGenesis.patch.paras.paras[*][1][1], only if those keys exist.
 replace_runtime_code() {
   local input_spec_path="$1"
   local output_spec_path="$2"
@@ -550,12 +965,53 @@ replace_runtime_code() {
   *) new_code="0x${new_code}" ;;
   esac
 
-  # --- write .genesis.runtimeGenesis.code (create path if missing) ---
+  # Only update keys if paths already exist (do not create any missing branches)
   jq --arg code "$new_code" '
-    .genesis as $g
-    | .genesis = ($g // {})
-    | .genesis.runtimeGenesis = (.genesis.runtimeGenesis // {})
-    | .genesis.runtimeGenesis.code = $code
+    # Update .genesis.runtimeGenesis.code only if it already exists
+    (if (.genesis? // null) != null
+        and (.genesis.runtimeGenesis? // null) != null
+        and (.genesis.runtimeGenesis | has("code"))
+     then
+       .genesis.runtimeGenesis.code = $code
+     else
+       .
+     end)
+    |
+    # Update .genesis.raw.top["0x3a636f6465"] only if it already exists
+    (if (.genesis? // null) != null
+        and (.genesis.raw? // null) != null
+        and (.genesis.raw.top? // null) != null
+        and (.genesis.raw.top | has("0x3a636f6465"))
+     then
+       .genesis.raw.top["0x3a636f6465"] = $code
+     else
+       .
+     end)
+    |
+    # Update .genesis.runtimeGenesis.patch.paras.paras[*][1][1] only if the structure exists
+    (if (.genesis? // null) != null
+        and (.genesis.runtimeGenesis? // null) != null
+        and (.genesis.runtimeGenesis.patch? // null) != null
+        and (.genesis.runtimeGenesis.patch.paras? // null) != null
+        and (.genesis.runtimeGenesis.patch.paras.paras? // null) != null
+     then
+       .genesis.runtimeGenesis.patch.paras.paras =
+         (.genesis.runtimeGenesis.patch.paras.paras
+           | map(
+               if (type == "array"
+                   and length >= 2
+                   and (.[1] | type) == "array"
+                   and (.[1] | length) >= 2)
+               then
+                 (.[1][1] = $code)
+               else
+                 .
+               end
+             )
+         )
+     else
+       .
+     end)
   ' "$input_spec_path" > "$output_spec_path"
 
   dbg "replace_runtime_code: output: $output_spec_path"
@@ -669,6 +1125,45 @@ patch_relay_with_paras() {
     .genesis.runtimeGenesis.patch.paras.paras  = (
       (.genesis.runtimeGenesis.patch.paras.paras // []) + $paras[0]
     )
+    |
+    # cores = number of configured paras (at least 1)
+    ((.genesis.runtimeGenesis.patch.paras.paras // []) | length) as $cores |
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch.configuration? // null) != null
+          and (.genesis.runtimeGenesis.patch.configuration.config? // null) != null
+          and (.genesis.runtimeGenesis.patch.configuration.config.scheduler_params? // null) != null
+          and (.genesis.runtimeGenesis.patch.configuration.config.scheduler_params | has("num_cores")))
+      then
+        .genesis.runtimeGenesis.patch.configuration.config.scheduler_params.num_cores = (if $cores > 0 then $cores else 1 end)
+      else . end
+    )
+    |
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch.configuration? // null) != null
+          and (.genesis.runtimeGenesis.patch.configuration.config? // null) != null
+          and (.genesis.runtimeGenesis.patch.configuration.config | has("minimum_backing_votes")))
+      then
+        .genesis.runtimeGenesis.patch.configuration.config.minimum_backing_votes = 2
+      else . end
+    )
+    |
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch.configuration? // null) != null
+          and (.genesis.runtimeGenesis.patch.configuration.config? // null) != null
+          and (.genesis.runtimeGenesis.patch.configuration.config | has("needed_approvals")))
+      then
+        .genesis.runtimeGenesis.patch.configuration.config.needed_approvals = 2
+      else . end
+    )
   ' "$relay_in" > "$tmp_out" && mv -- "$tmp_out" "$relay_out"
   echo "Relay spec patched with parachain data → $relay_out"
 }
@@ -695,10 +1190,10 @@ print_validator_run_command() {
 
   # prefer raw-spec if it exists, otherwise validator spec; else error
   local spec_json
-  if [ -f "$WORKDIR/$RELAYCHAIN-raw.json" ]; then
-    spec_json="$WORKDIR/$RELAYCHAIN-raw.json"
+  if [ -f "$WORKDIR/relaychain-raw.json" ]; then
+    spec_json="$WORKDIR/relaychain-raw.json"
   else
-    echo "ERROR: spec json not found (expected $WORKDIR/$RELAYCHAIN-raw.json)" >&2
+    echo "ERROR: spec json not found (expected $WORKDIR/relaychain-raw.json)" >&2
     return 1
   fi
 
@@ -767,8 +1262,8 @@ print_collator_run_command() {
 
   # Relay spec (not critical here): prefer RAW, else VAL
   local relay_spec_json
-  if [ -f "$WORKDIR/$RELAYCHAIN-raw.json" ]; then
-    relay_spec_json="$WORKDIR/$RELAYCHAIN-raw.json"
+  if [ -f "$WORKDIR/relaychain-raw.json" ]; then
+    relay_spec_json="$WORKDIR/relaychain-raw.json"
   else
     relay_spec_json=""  # allowed to be empty per request
   fi
@@ -819,12 +1314,12 @@ print_run_commands() {
 
   for ((v=0;v<VALIDATORS;v++)); do
     echo
-    print_validator_run_command "Validator_$((v+1))" "$WORKDIR/$RELAYCHAIN-raw.json" || exit 1
+    print_validator_run_command "Validator_$((v+1))" "$WORKDIR/relaychain-raw.json" || exit 1
   done
   for ((p=0;p<PARACHAINS;p++)); do
     for ((c=0;c<COLLATORS;c++)); do
       echo
-      print_collator_run_command "Collator_$((PARA_BASE+p))_$((c+1))" "$WORKDIR/$PARACHAIN-$((PARA_BASE+p))-raw.json" || exit 1
+      print_collator_run_command "Collator_$((PARA_BASE+p))_$((c+1))" "$WORKDIR/parachain-$((PARA_BASE+p))-raw.json" || exit 1
     done
   done
 }
@@ -927,8 +1422,8 @@ generate_shadow_config() {
   local lower node_dir base_path manifest listen_addr rpc_port prom_port node_key_hex spec_json relay_spec_json name host
 
   # Prefer RAW relay spec if exists, else VAL spec (path used by collators after --)
-  if [ -f "$WORKDIR/$RELAYCHAIN-raw.json" ]; then
-    relay_spec_json="$WORKDIR/$RELAYCHAIN-raw.json"
+  if [ -f "$WORKDIR/relaychain-raw.json" ]; then
+    relay_spec_json="$WORKDIR/relaychain-raw.json"
   fi
 
   # Start network node id counter
@@ -954,7 +1449,7 @@ generate_shadow_config() {
     node_key_hex="$(jq -r '.node_key // empty' "$manifest")"
 
     # Validators always use the relay RAW (already generated below in the script)
-    spec_json="$WORKDIR/$RELAYCHAIN-raw.json"
+    spec_json="$WORKDIR/relaychain-raw.json"
 
     host="$name"
     local host_key
@@ -999,7 +1494,7 @@ generate_shadow_config() {
   for ((p=0; p<PARACHAINS; p++)); do
     id=$((PARA_BASE+p))
     # Parachain RAW spec path (assembled earlier in the script)
-    local para_raw="$WORKDIR/$PARACHAIN-$id-raw.json"
+    local para_raw="$WORKDIR/parachain-$id-raw.json"
 
     for ((c=0; c<COLLATORS; c++)); do
       name="Collator_$((PARA_BASE+p))_$((c+1))"
@@ -1079,21 +1574,26 @@ for ((p=0;p<PARACHAINS;p++)); do
   done
 done
 
+
+# Copy template chainspecs
+cp -a "$PARA_SPEC_TMPL" "$WORKDIR/parachain.json"
+cp -a "$RELAY_SPEC_TMPL" "$WORKDIR/relaychain.json"
+
+
 # Patch spec by validators
-"$POLKADOT_BIN" build-spec --chain "$RELAYCHAIN" --disable-default-bootnode  > "$WORKDIR/$RELAYCHAIN.json" 2>/dev/null
-cp "$WORKDIR/$RELAYCHAIN.json" "$WORKDIR/$RELAYCHAIN-val.json"
-clean_dev_validators_patch "$WORKDIR/$RELAYCHAIN-val.json"
+
+cp "$WORKDIR/relaychain.json" "$WORKDIR/relaychain-val.json"
+clean_dev_validators_patch "$WORKDIR/relaychain-val.json"
 for ((v=0;v<VALIDATORS;v++)); do
-  add_dev_validators_patch "$WORKDIR/$RELAYCHAIN-val.json" "Validator_$((v+1))" || exit 1
+  add_dev_validators_patch "$WORKDIR/relaychain-val.json" "Validator_$((v+1))" || exit 1
 done
 
-# Generate parachain artifacts
-"$COLLATOR_BIN" build-spec --chain "$PARACHAIN" --disable-default-bootnode > "$WORKDIR/$PARACHAIN.json" 2>/dev/null
-
 # no-code spec for debugging
-replace_runtime_code "$WORKDIR/$RELAYCHAIN.json" "$WORKDIR/$RELAYCHAIN-no-code.json"
-replace_runtime_code "$WORKDIR/$RELAYCHAIN-val.json" "$WORKDIR/$RELAYCHAIN-val-no-code.json"
-replace_runtime_code "$WORKDIR/$PARACHAIN.json" "$WORKDIR/$PARACHAIN-no-code.json"
+replace_runtime_code "$WORKDIR/relaychain.json" "$WORKDIR/relaychain-no-code.json"
+replace_runtime_code "$WORKDIR/relaychain-val.json" "$WORKDIR/relaychain-val-no-code.json"
+replace_runtime_code "$WORKDIR/parachain.json" "$WORKDIR/parachain-no-code.json"
+
+# Generate parachain artifacts
 
 paras_file="$WORKDIR/paras.json"
 printf '[]' > "$paras_file"
@@ -1103,20 +1603,18 @@ for ((p=0; p<PARACHAINS; p++)); do
   gfile="$WORKDIR/para-${id}-genesis"
   wfile="$WORKDIR/para-${id}-wasm"
 
-  cp "$WORKDIR/$PARACHAIN.json" "$WORKDIR/$PARACHAIN-$id.json"
+  cp "$PARA_SPEC_TMPL" "$WORKDIR/parachain-$id.json"
 
-  dbg clean_dev_collators_patch "$WORKDIR/$PARACHAIN-$id.json" "$id"
+  dbg clean_dev_collators_patch "$WORKDIR/parachain-$id.json" "$id"
+  clean_dev_collators_patch "$WORKDIR/parachain-$id.json" "$id"
 
-  clean_dev_collators_patch "$WORKDIR/$PARACHAIN-$id.json" "$id"
   for ((c=0;c<COLLATORS;c++)); do
-
-    dbg add_dev_collators_patch "$WORKDIR/$PARACHAIN-$id.json" "Collator_$((PARA_BASE+p))_$((c+1))"
-
-    add_dev_collators_patch "$WORKDIR/$PARACHAIN-$id.json" "Collator_$((PARA_BASE+p))_$((c+1))" || exit 1
+    dbg add_dev_collators_patch "$WORKDIR/parachain-$id.json" "Collator_$((PARA_BASE+p))_$((c+1))"
+    add_dev_collators_patch "$WORKDIR/parachain-$id.json" "Collator_$((PARA_BASE+p))_$((c+1))" || exit 1
   done
 
-  "$COLLATOR_BIN" export-genesis-state --chain "$WORKDIR/$PARACHAIN-$id.json" "$gfile" >/dev/null 2>/dev/null
-  "$COLLATOR_BIN" export-genesis-wasm  --chain "$WORKDIR/$PARACHAIN-$id.json" "$wfile" >/dev/null 2>/dev/null
+  "$COLLATOR_BIN" export-genesis-state --chain "$WORKDIR/parachain-$id.json" "$gfile" >/dev/null 2>/dev/null
+  "$COLLATOR_BIN" export-genesis-wasm  --chain "$WORKDIR/parachain-$id.json" "$wfile" >/dev/null 2>/dev/null
 
   tmp_paras="$(mktemp)"; _tmp_files+=("$tmp_paras")
   jq --rawfile gh "$gfile" --rawfile vc "$wfile" --argjson id "$id" \
@@ -1124,32 +1622,32 @@ for ((p=0; p<PARACHAINS; p++)); do
     "$paras_file" > "$tmp_paras"
   mv -- "$tmp_paras" "$paras_file"
 
-  "$COLLATOR_BIN" build-spec --chain "$WORKDIR/$PARACHAIN-$id.json" --disable-default-bootnode --raw > "$WORKDIR/$PARACHAIN-$id-raw.json" 2>/dev/null
-  replace_runtime_code "$WORKDIR/$PARACHAIN-$id.json" "$WORKDIR/$PARACHAIN-$id-no-code.json"
+  "$COLLATOR_BIN" build-spec --chain "$WORKDIR/parachain-$id.json" --disable-default-bootnode --raw > "$WORKDIR/parachain-$id-raw.json" 2>/dev/null
+  replace_runtime_code "$WORKDIR/parachain-$id.json" "$WORKDIR/parachain-$id-no-code.json"
 done
 
 # Patch relay (validators spec) with collected parachain entries
-patch_relay_with_paras "$WORKDIR/$RELAYCHAIN-val.json" "$paras_file" "$WORKDIR/${RELAYCHAIN}-val-paras.json" || exit 1
-replace_runtime_code "$WORKDIR/${RELAYCHAIN}-val-paras.json" "$WORKDIR/${RELAYCHAIN}-val-paras-no-code.json"
+patch_relay_with_paras "$WORKDIR/relaychain-val.json" "$paras_file" "$WORKDIR/relaychain-val-paras.json" || exit 1
+replace_runtime_code "$WORKDIR/relaychain-val-paras.json" "$WORKDIR/relaychain-val-paras-no-code.json"
 
 # Generate raw-spec
-"$POLKADOT_BIN" build-spec --chain "$WORKDIR/${RELAYCHAIN}-val-paras.json" --raw > "$WORKDIR/$RELAYCHAIN-raw.json" 2>/dev/null
+"$POLKADOT_BIN" build-spec --chain "$WORKDIR/relaychain-val-paras.json" --raw > "$WORKDIR/relaychain-raw.json" 2>/dev/null
 
 # Provide keys for validators
 for ((v=0;v<VALIDATORS;v++)); do
-  provision_node_keys "Validator_$((v+1))" "$WORKDIR/$RELAYCHAIN-raw.json" || exit 1
+  provision_node_keys "Validator_$((v+1))" "$WORKDIR/relaychain-raw.json" || exit 1
 done
 
 # Provide keys for collators
 for ((p=0;p<PARACHAINS;p++)); do
   for ((c=0;c<COLLATORS;c++)); do
     id=$((PARA_BASE+p))
-    provision_node_keys "Collator_$((PARA_BASE+p))_$((c+1))" "$WORKDIR/$PARACHAIN-$id-raw.json" || exit 1
+    provision_node_keys "Collator_$((PARA_BASE+p))_$((c+1))" "$WORKDIR/parachain-$id-raw.json" || exit 1
   done
 done
 
 # Clean
-clean
+#clean
 
 # Print run commands
 print_run_commands
