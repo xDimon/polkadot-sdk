@@ -51,7 +51,7 @@ mkdir -p -- "$WORKDIR"
 dbg "WORKDIR $WORKDIR created"
 
 POLKADOT_REPO="$HOME/Projects/polkadot"
-RELAYCHAIN="rococo-local"
+RELAYCHAIN="westend-local"
 PARA_BASE=2000
 LOGCFG="info"
 
@@ -198,6 +198,117 @@ else
 fi
 echo "parachain spec template - found: $PARA_SPEC_TMPL"
 
+SING_AND_SUBMIT_BIN="xtsend.proj/target/release/xtsend"
+if [[ -f "$SING_AND_SUBMIT_BIN" ]]; then
+  SING_AND_SUBMIT_BIN="$(realpath "$SING_AND_SUBMIT_BIN")"
+elif ! SING_AND_SUBMIT_BIN="$(command -v "xtsend" 2>/dev/null)"; then
+  echo "xtsend - not found; trying to build"
+  mkdir -p xtsend.proj/src; cd xtsend.proj
+  cat<<'EOF'>Cargo.toml
+[package]
+name = "xtsend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+rand = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+subxt = "0.44"
+subxt-signer = "0.44"
+parity-scale-codec = "3"
+scale-info = "2"
+EOF
+
+ cat<<'EOF'>src/main.rs
+use anyhow::Result;
+use rand::RngCore;
+use std::{env, str::FromStr};
+
+use subxt::{config::polkadot::PolkadotConfig, OnlineClient};
+use subxt::tx::{DefaultPayload, TxStatus};
+use subxt_signer::{sr25519, SecretUri};
+use subxt::ext::scale_value::{Value as SValue, Composite as SComposite};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Аргументы: <ws_url> <suri> <size_bytes>
+    let ws_url = env::args().nth(1).expect("usage: <ws_url> <suri> <size_bytes>");
+    let suri   = env::args().nth(2).expect("suri");
+    let size_bytes: usize = env::args()
+        .nth(3).expect("size_bytes")
+        .parse().expect("size_bytes must be integer");
+
+    // Клиент и подписант
+    let api    = OnlineClient::<PolkadotConfig>::from_url(&ws_url).await?;
+    let secret = SecretUri::from_str(&suri)?;
+    let signer = sr25519::Keypair::from_uri(&secret)?;
+
+    // Случайные байты нужного размера
+    let mut raw = vec![0u8; size_bytes];
+    rand::thread_rng().fill_bytes(&mut raw);
+
+    // Режем на 1024-байтные чанки, последний — нулевой паддинг
+    let chunks_len = (raw.len() + 1023) / 1024;
+    let mut elems: Vec<SValue<()>> = Vec::with_capacity(chunks_len);
+    for part in raw.chunks(1024) {
+        let mut buf = [0u8; 1024];
+        buf[..part.len()].copy_from_slice(part);
+        // Один элемент типа [u8; 1024]
+        elems.push(SValue::from_bytes(&buf));
+    }
+
+    // Поле garbage: Vec<[u8;1024]> — просто последовательноcть элементов
+    let garbage: SValue<()> = SValue::from(elems);
+
+    // Именованный композит аргумента { garbage: ... }
+    let fields = SComposite::named([("garbage".to_string(), garbage)]);
+
+    // Формируем payload Glutton.bloat(...) и отправляем
+    let payload = DefaultPayload::new("Glutton", "bloat", fields);
+    let mut progress = api
+        .tx()
+        .sign_and_submit_then_watch_default(&payload, &signer)
+        .await?;
+
+    // Минимальные статусы + номер и хеш блока где попали/финализировались
+    while let Some(status) = progress.next().await {
+        match status? {
+            TxStatus::Validated => println!("[ ] Validated"),
+            TxStatus::Broadcasted => println!("[>] Broadcasted"),
+            TxStatus::NoLongerInBestBlock => println!("[ ] NoLongerInBestBlock"),
+            TxStatus::InBestBlock(info) => {
+                let h = info.block_hash();
+                let b = api.blocks().at(h).await?;
+                println!("[*] InBestBlock    #{} {}", b.number(), h);
+            }
+            TxStatus::InFinalizedBlock(info) => {
+                let h = info.block_hash();
+                let b = api.blocks().at(h).await?;
+                println!("[✓] FinalizedBlock #{} {}", b.number(), h);
+                break;
+            }
+            TxStatus::Error   { message } => { eprintln!("[x] Error:   {message}"); break; }
+            TxStatus::Invalid { message } => { eprintln!("[x] Invalid: {message}"); break; }
+            TxStatus::Dropped { message } => { eprintln!("[x] Dropped: {message}"); break; }
+        }
+    }
+
+    Ok(())
+}
+EOF
+
+
+  cargo build --release
+
+  SING_AND_SUBMIT_BIN="$(realpath target/release/xtsend)"
+  if ! [[ -f "$SING_AND_SUBMIT_BIN" ]]; then
+    echo "xtsend - is not built"
+    exit 1
+  fi
+  cd -
+fi
+echo "xtsend - found: $SING_AND_SUBMIT_BIN"
 
 
 
@@ -1647,7 +1758,7 @@ for ((p=0;p<PARACHAINS;p++)); do
 done
 
 # Clean
-#clean
+clean
 
 # Print run commands
 print_run_commands
@@ -1660,3 +1771,4 @@ generate_shadow_config || exit 1
 #    echo "#################################################################################################"
 #    cat $WORKDIR/shadow.yaml
 #    echo "##################################################################################################"
+
