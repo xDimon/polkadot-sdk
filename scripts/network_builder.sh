@@ -221,76 +221,82 @@ scale-info = "2"
 EOF
 
  cat<<'EOF'>src/main.rs
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rand::RngCore;
 use std::{env, str::FromStr};
 
-use subxt::{config::polkadot::PolkadotConfig, OnlineClient};
-use subxt::tx::{DefaultPayload, TxStatus};
+use subxt::{config::polkadot::PolkadotConfig as C, OnlineClient};
+use subxt::tx::TxStatus;
 use subxt_signer::{sr25519, SecretUri};
-use subxt::ext::scale_value::{Value as SValue, Composite as SComposite};
+
+// Сгенерённые биндинги (subxt codegen)
+mod runtime;
+
+// RuntimeCall (enum всех вызовов рантайма)
+use runtime::api::Call as RuntimeCall;
+// Тип веса
+use runtime::api::runtime_types::sp_weights::weight_v2::Weight;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Аргументы: <ws_url> <suri> <size_bytes>
-    let ws_url = env::args().nth(1).expect("usage: <ws_url> <suri> <size_bytes>");
-    let suri   = env::args().nth(2).expect("suri");
-    let size_bytes: usize = env::args()
-        .nth(3).expect("size_bytes")
-        .parse().expect("size_bytes must be integer");
+    // <ws_url> <suri> <size_bytes>
+    let ws_url = env::args().nth(1).context("usage: <ws_url> <suri> <size_bytes>")?;
+    let suri   = env::args().nth(2).context("suri missing")?;
+    let size   = env::args().nth(3).context("size_bytes missing")?.parse::<usize>()?;
 
-    // Клиент и подписант
-    let api    = OnlineClient::<PolkadotConfig>::from_url(&ws_url).await?;
+    // клиент и подписант
+    let api    = OnlineClient::<C>::from_url(&ws_url).await?;
     let secret = SecretUri::from_str(&suri)?;
     let signer = sr25519::Keypair::from_uri(&secret)?;
 
-    // Случайные байты нужного размера
-    let mut raw = vec![0u8; size_bytes];
+    // Случайные байты -> режем на массивы [u8; 1024] с паддингом нулями
+    let mut raw = vec![0u8; size];
     rand::thread_rng().fill_bytes(&mut raw);
 
-    // Режем на 1024-байтные чанки, последний — нулевой паддинг
-    let chunks_len = (raw.len() + 1023) / 1024;
-    let mut elems: Vec<SValue<()>> = Vec::with_capacity(chunks_len);
-    for part in raw.chunks(1024) {
+    let mut garbage: Vec<[u8; 1024]> = Vec::with_capacity((raw.len() + 1023) / 1024);
+    for chunk in raw.chunks(1024) {
         let mut buf = [0u8; 1024];
-        buf[..part.len()].copy_from_slice(part);
-        // Один элемент типа [u8; 1024]
-        elems.push(SValue::from_bytes(&buf));
+        buf[..chunk.len()].copy_from_slice(chunk);
+        garbage.push(buf);
     }
 
-    // Поле garbage: Vec<[u8;1024]> — просто последовательноcть элементов
-    let garbage: SValue<()> = SValue::from(elems);
+    // 1) Собираем внутренний вызов Glutton::bloat { garbage }
+    let inner_call: RuntimeCall = RuntimeCall::Glutton(
+        runtime::api::runtime_types::pallet_glutton::pallet::Call::bloat { garbage }
+    );
 
-    // Именованный композит аргумента { garbage: ... }
-    let fields = SComposite::named([("garbage".to_string(), garbage)]);
+    // 2) Собираем payload для sudo_unchecked_weight (аргументы ПО ОТДЕЛЬНОСТИ)
+    let payload = runtime::api::tx()
+        .sudo()
+        .sudo_unchecked_weight(
+            inner_call,
+            Weight { ref_time: 0, proof_size: 0 },
+        );
 
-    // Формируем payload Glutton.bloat(...) и отправляем
-    let payload = DefaultPayload::new("Glutton", "bloat", fields);
-    let mut progress = api
-        .tx()
+    // 3) Подписываем/шлём
+    let mut progress = api.tx()
         .sign_and_submit_then_watch_default(&payload, &signer)
         .await?;
 
-    // Минимальные статусы + номер и хеш блока где попали/финализировались
     while let Some(status) = progress.next().await {
         match status? {
-            TxStatus::Validated => println!("[ ] Validated"),
-            TxStatus::Broadcasted => println!("[>] Broadcasted"),
-            TxStatus::NoLongerInBestBlock => println!("[ ] NoLongerInBestBlock"),
+            TxStatus::Validated => eprintln!("[ ] validated"),
+            TxStatus::Broadcasted => eprintln!("[>] broadcasted"),
+            TxStatus::NoLongerInBestBlock => eprintln!("[ ] no-longer-in-best-block"),
             TxStatus::InBestBlock(info) => {
                 let h = info.block_hash();
                 let b = api.blocks().at(h).await?;
-                println!("[*] InBestBlock    #{} {}", b.number(), h);
+                eprintln!("[*] in-best-block    #{} {}", b.number(), h);
             }
             TxStatus::InFinalizedBlock(info) => {
                 let h = info.block_hash();
                 let b = api.blocks().at(h).await?;
-                println!("[✓] FinalizedBlock #{} {}", b.number(), h);
+                eprintln!("[✓] finalized         #{} {}", b.number(), h);
                 break;
             }
-            TxStatus::Error   { message } => { eprintln!("[x] Error:   {message}"); break; }
-            TxStatus::Invalid { message } => { eprintln!("[x] Invalid: {message}"); break; }
-            TxStatus::Dropped { message } => { eprintln!("[x] Dropped: {message}"); break; }
+            TxStatus::Error { message }   => { eprintln!("[x] error:   {message}"); break; }
+            TxStatus::Invalid { message } => { eprintln!("[x] invalid: {message}"); break; }
+            TxStatus::Dropped { message } => { eprintln!("[x] dropped: {message}"); break; }
         }
     }
 
