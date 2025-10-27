@@ -75,6 +75,16 @@ dbg "WORKDIR $WORKDIR created"
 POLKADOT_REPO="${POLKADOT_REPO:-$HOME/Projects/polkadot}"
 RELAYCHAIN="${RELAYCHAIN:-westend-local}"
 PARA_BASE=${PARA_BASE:-2000}
+
+# --- host bandwidth (для всех хостов)
+HOST_BW_UP="${HOST_BW_UP:-1 Gbit}"
+HOST_BW_DOWN="${HOST_BW_DOWN:-1 Gbit}"
+
+# --- pov bloater
+XTSEND_PAYLOAD_BYTES="${XTSEND_PAYLOAD_BYTES:-1000000}" # 1Mb
+XTSEND_INTERVAL_SEC="${XTSEND_INTERVAL_SEC:-1}"
+XTSEND_START_DELAY_SEC="${XTSEND_START_DELAY_SEC:-30}"
+
 LOGCFG="${LOGCFG:-info}"
 
 # Ensure base toolchain
@@ -207,10 +217,10 @@ else
 fi
 echo "parachain spec template - found: $PARA_SPEC_TMPL"
 
-SING_AND_SUBMIT_BIN="xtsend.proj/target/release/xtsend"
-if [[ -f "$SING_AND_SUBMIT_BIN" ]]; then
-  SING_AND_SUBMIT_BIN="$(canonical_path "$SING_AND_SUBMIT_BIN")"
-elif ! SING_AND_SUBMIT_BIN="$(command -v xtsend 2>/dev/null)"; then
+XTSEND_BIN="xtsend.proj/target/release/xtsend"
+if [[ -f "$XTSEND_BIN" ]]; then
+  XTSEND_BIN="$(canonical_path "$XTSEND_BIN")"
+elif ! XTSEND_BIN="$(command -v xtsend 2>/dev/null)"; then
   echo "xtsend - not found; trying to build"
   mkdir -p xtsend.proj/src; cd xtsend.proj
   cat > Cargo.toml <<'EOF'
@@ -293,11 +303,11 @@ async fn main() -> Result<()> {
 EOF
 
   cargo build --release
-  SING_AND_SUBMIT_BIN="$(canonical_path target/release/xtsend)"
-  [ -f "$SING_AND_SUBMIT_BIN" ] || { echo "xtsend - is not built"; exit 1; }
+  XTSEND_BIN="$(canonical_path target/release/xtsend)"
+  [ -f "$XTSEND_BIN" ] || { echo "xtsend - is not built"; exit 1; }
   cd - >/dev/null
 fi
-echo "xtsend - found: $SING_AND_SUBMIT_BIN"
+echo "xtsend - found: $XTSEND_BIN"
 
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -1224,8 +1234,8 @@ generate_shadow_config() {
       printf '        node [\n'
       printf '          id %d\n' "$i"
       printf '          label "%s"\n' "${host_labels[$((i-1))]}"
-      printf '          host_bandwidth_up "1 Gbit"\n'
-      printf '          host_bandwidth_down "1 Gbit"\n'
+      printf '          host_bandwidth_up "%s"\n' "$HOST_BW_UP"
+      printf '          host_bandwidth_down "%s"\n' "$HOST_BW_DOWN"
       printf '        ]\n'
     done
     for ((i=1; i<=total_hosts; i++)); do
@@ -1334,6 +1344,18 @@ generate_shadow_config() {
         printf '          RUST_STDOUT_FLUSH_ON_WRITE: "1"\n'
         printf '          RUST_LOG: "%s"\n' "$LOGCFG"
         printf '          SHADOW_TAG: "%s"\n' "$host"
+        printf '        expected_final_state: running\n'
+        printf '      - path: %s\n' "/bin/bash"
+        printf '        args: [\n'
+        printf '          "-lc",\n'
+        printf '          "sleep %s; while true; do %s ws://127.0.0.1:%s/ //%s %s; sleep %s; done"\n' \
+               "$XTSEND_START_DELAY_SEC" \
+               "$XTSEND_BIN" \
+               "$rpc_port" \
+               "$name" \
+               "$XTSEND_PAYLOAD_BYTES" \
+               "$XTSEND_INTERVAL_SEC"
+        printf '        ]\n'
         printf '        expected_final_state: running\n'
       } >>"$out"
       ip_octet=$((ip_octet+1)); net_id=$((net_id+1))
