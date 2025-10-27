@@ -1,9 +1,13 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# shellcheck shell=bash
 [ -z "${BASH_VERSION:-}" ] && exec /usr/bin/env bash "$0" "$@"
 
 set -euo pipefail
+IFS=$'\n\t'
 
-# Debug toggle and helper
+# =====================
+# Config & debug utils
+# =====================
 : "${DEBUG:=0}"
 dbg() {
   if [ "$DEBUG" = "1" ]; then
@@ -11,6 +15,29 @@ dbg() {
   fi
 }
 
+# Prefer deterministic mktemp files under WORKDIR when possible
+mktemp_wrk() {
+  local pattern="$1"; shift || true
+  # Fall back to default mktemp if WORKDIR is not yet created
+  if [ -n "${WORKDIR:-}" ] && [ -d "$WORKDIR" ]; then
+    mktemp "$WORKDIR/$pattern"
+  else
+    mktemp "$pattern"
+  fi
+}
+
+# Portable canonical path (BSD/macOS & Linux)
+canonical_path() {
+  local p="$1"
+  (cd "$(dirname -- "$p")" >/dev/null 2>&1 && printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$p")")
+}
+
+# Hard fail if required command is missing
+require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not found" >&2; exit 1; }; }
+
+# =====================
+# Args
+# =====================
 if (( $# != 4 )); then
   echo "Usage: $0 <VALIDATORS 2..8> <PARACHAINS 0..8> <COLLATORS 0..8> <WORKDIR>"
   exit 1
@@ -24,37 +51,38 @@ WORKDIR="${4:-tmp}"
 # Basic validation
 rev='^[2-8]$'
 re='^[0-8]$'
-[[ "$VALIDATORS"  =~ $rev ]] || { echo "VALIDATORS must be 2..8"; exit 1; }
-[[ "$PARACHAINS"  =~ $re ]] || { echo "PARACHAINS must be 0..8"; exit 1; }
-[[ "$COLLATORS"   =~ $re ]] || { echo "COLLATORS must be 0..8";  exit 1; }
+[[ "$VALIDATORS" =~ $rev ]] || { echo "VALIDATORS must be 2..8"; exit 1; }
+[[ "$PARACHAINS" =~ $re ]] || { echo "PARACHAINS must be 0..8"; exit 1; }
+[[ "$COLLATORS"  =~ $re ]] || { echo "COLLATORS must be 0..8";  exit 1; }
 
-canonical_path() {
-  local p="$1"
-  # Use command substitution; resolve dirname with a subshell, then append the basename
-  # Works on macOS/BSD and Linux; avoids GNU-specific realpath flags
-  (cd "$(dirname -- "$p")" >/dev/null 2>&1 && printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$p")")
-}
 WORKDIR="$(canonical_path "$WORKDIR")"
 
-if [ "${RMTMP:-0}" -eq "1" -a -e "$WORKDIR"  ]; then
+if [ "${RMTMP:-0}" -eq 1 ] && [ -e "$WORKDIR" ]; then
   echo "Previous WORKDIR '$WORKDIR' was removed." >&2
   rm -Rf "$WORKDIR"
 fi
 
-if [[ -e "$WORKDIR" ]]; then
+if [ -e "$WORKDIR" ]; then
   echo "WORKDIR '$WORKDIR' already exists, remove it first." >&2
   exit 1
 fi
-
 mkdir -p -- "$WORKDIR"
-
 dbg "WORKDIR $WORKDIR created"
 
-POLKADOT_REPO="$HOME/Projects/polkadot"
-RELAYCHAIN="westend-local"
-PARA_BASE=2000
-LOGCFG="info"
+# =====================
+# Repos / constants
+# =====================
+POLKADOT_REPO="${POLKADOT_REPO:-$HOME/Projects/polkadot}"
+RELAYCHAIN="${RELAYCHAIN:-westend-local}"
+PARA_BASE=${PARA_BASE:-2000}
+LOGCFG="${LOGCFG:-info}"
 
+# Ensure base toolchain
+require_cmd cargo
+require_cmd rustc
+require_cmd jq
+require_cmd awk
+require_cmd xxd
 
 # cd polkadot-sdk
 # cargo build --profile testnet --features x-shadow,fast-runtime -p polkadot -p polkadot-parachain-bin
@@ -64,147 +92,128 @@ LOGCFG="info"
 # cargo install subxt-cli
 # cargo install subkey
 
+# =====================
+# Locate/build required binaries
+# (Use canonical_path instead of non-portable realpath)
+# =====================
 POLKADOT_BIN="$POLKADOT_REPO/target/testnet/polkadot"
 if [[ -f "$POLKADOT_BIN" ]]; then
-  POLKADOT_BIN="$(realpath "$POLKADOT_BIN")"
-elif ! POLKADOT_BIN="$(command -v "polkadot" 2>/dev/null)"; then
+  POLKADOT_BIN="$(canonical_path "$POLKADOT_BIN")"
+elif ! POLKADOT_BIN="$(command -v polkadot 2>/dev/null)"; then
   echo "polkadot - not found; trying to build"
-  cd $POLKADOT_REPO
+  cd "$POLKADOT_REPO"
   cargo build --profile testnet --features x-shadow -p polkadot
   PATH_BAK=$PATH
   PATH="$POLKADOT_REPO/target/testnet/:$PATH"
-  if ! POLKADOT_BIN="$(command -v "polkadot" 2>/dev/null)"; then
-    echo "polkadot - is not built"
-    exit 1
-  fi
+  POLKADOT_BIN="$(command -v polkadot 2>/dev/null || true)"
   PATH=$PATH_BAK
+  [ -n "$POLKADOT_BIN" ] || { echo "polkadot - is not built"; exit 1; }
 fi
 echo "polkadot - found: $POLKADOT_BIN"
 
 COLLATOR_BIN="$POLKADOT_REPO/target/testnet/polkadot-parachain"
 if [[ -f "$COLLATOR_BIN" ]]; then
-  COLLATOR_BIN="$(realpath "$COLLATOR_BIN")"
-elif ! COLLATOR_BIN="$(command -v "polkadot-parachain" 2>/dev/null)"; then
+  COLLATOR_BIN="$(canonical_path "$COLLATOR_BIN")"
+elif ! COLLATOR_BIN="$(command -v polkadot-parachain 2>/dev/null)"; then
   echo "polkadot-parachain - not found; trying to build"
-  cd $POLKADOT_REPO
+  cd "$POLKADOT_REPO"
   cargo build --profile testnet -p polkadot-parachain-bin
   PATH_BAK=$PATH
   PATH="$POLKADOT_REPO/target/testnet/:$PATH"
-  if ! COLLATOR_BIN="$(command -v "polkadot-parachain" 2>/dev/null)"; then
-    echo "polkadot-parachain - is not built"
-    exit 1
-  fi
+  COLLATOR_BIN="$(command -v polkadot-parachain 2>/dev/null || true)"
   PATH=$PATH_BAK
+  [ -n "$COLLATOR_BIN" ] || { echo "polkadot-parachain - is not built"; exit 1; }
 fi
 echo "polkadot-parachain - found: $COLLATOR_BIN"
 
 SPEC_BUILDER_BIN="$POLKADOT_REPO/target/testnet/chain-spec-builder"
 if [[ -f "$SPEC_BUILDER_BIN" ]]; then
-  SPEC_BUILDER_BIN="$(realpath "$SPEC_BUILDER_BIN")"
-elif ! SPEC_BUILDER_BIN="$(command -v "chain-spec-builder" 2>/dev/null)"; then
+  SPEC_BUILDER_BIN="$(canonical_path "$SPEC_BUILDER_BIN")"
+elif ! SPEC_BUILDER_BIN="$(command -v chain-spec-builder 2>/dev/null)"; then
   echo "chain-spec-builder - not found; trying to build"
-  cd $POLKADOT_REPO
+  cd "$POLKADOT_REPO"
   cargo build --profile testnet -p staging-chain-spec-builder --bin chain-spec-builder
   PATH_BAK=$PATH
   PATH="$POLKADOT_REPO/target/testnet/:$PATH"
-  if ! SPEC_BUILDER_BIN="$(command -v "chain-spec-builder" 2>/dev/null)"; then
-    echo "chain-spec-builder - is not built"
-    exit 1
-  fi
+  SPEC_BUILDER_BIN="$(command -v chain-spec-builder 2>/dev/null || true)"
   PATH=$PATH_BAK
-  cd -
+  [ -n "$SPEC_BUILDER_BIN" ] || { echo "chain-spec-builder - is not built"; exit 1; }
 fi
 echo "chain-spec-builder - found: $SPEC_BUILDER_BIN"
 
-if ! SUBKEY_BIN="$(command -v "subkey" 2>/dev/null)"; then
+if ! SUBKEY_BIN="$(command -v subkey 2>/dev/null)"; then
   echo "subkey - not found; trying to install"
   cargo install subkey
   PATH_BAK=$PATH
   PATH="$HOME/.cargo/bin/:$PATH"
-  if ! SUBKEY_BIN="$(command -v "subkey" 2>/dev/null)"; then
-    echo "subkey - is not installed"
-    exit 1
-  fi
+  SUBKEY_BIN="$(command -v subkey 2>/dev/null || true)"
   PATH=$PATH_BAK
+  [ -n "$SUBKEY_BIN" ] || { echo "subkey - is not installed"; exit 1; }
 fi
 echo "subkey - found: $SUBKEY_BIN"
 
-if ! SUBXT_BIN="$(command -v "subxt" 2>/dev/null)"; then
+if ! SUBXT_BIN="$(command -v subxt 2>/dev/null)"; then
   echo "subxt - not found; trying to install"
   cargo install subxt-cli
   PATH_BAK=$PATH
   PATH="$HOME/.cargo/bin/:$PATH"
-  if ! SUBKEY_BIN="$(command -v "subxt" 2>/dev/null)"; then
-    echo "subxt - is not installed"
-    exit 1
-  fi
+  SUBXT_BIN="$(command -v subxt 2>/dev/null || true)"  # FIX: correct var
   PATH=$PATH_BAK
+  [ -n "$SUBXT_BIN" ] || { echo "subxt - is not installed"; exit 1; }
 fi
 echo "subxt - found: $SUBXT_BIN"
 
 RUNTIME_WASM="$POLKADOT_REPO/target/release/wbuild/glutton-westend-runtime/glutton_westend_runtime.compact.compressed.wasm"
 if [[ -f "$RUNTIME_WASM" ]]; then
-  RUNTIME_WASM="$(realpath "$RUNTIME_WASM")"
+  RUNTIME_WASM="$(canonical_path "$RUNTIME_WASM")"
 else
   echo "glutton_westend_runtime - not found; trying to build"
-  cd $POLKADOT_REPO
+  cd "$POLKADOT_REPO"
   cargo build --release -p glutton-westend-runtime
-  RUNTIME_WASM="$(realpath target/release/wbuild/glutton-westend-runtime/glutton_westend_runtime.compact.compressed.wasm)"
-  if ! [[ -f "$RUNTIME_WASM" ]]; then
-    echo "glutton_westend_runtime - is not built"
-    exit 1
-  fi
-  cd -
+  RUNTIME_WASM="$(canonical_path "target/release/wbuild/glutton-westend-runtime/glutton_westend_runtime.compact.compressed.wasm")"
+  [ -f "$RUNTIME_WASM" ] || { echo "glutton_westend_runtime - is not built"; exit 1; }
 fi
 echo "glutton_westend_runtime - found: $RUNTIME_WASM"
 
 RELAY_SPEC_TMPL="relaychain-template.json"
 if [[ -f "$RELAY_SPEC_TMPL" ]]; then
-  RELAY_SPEC_TMPL="$(realpath "$RELAY_SPEC_TMPL")"
+  RELAY_SPEC_TMPL="$(canonical_path "$RELAY_SPEC_TMPL")"
 else
   echo "relaychain spec template - not found; trying to build"
   "$POLKADOT_BIN" build-spec \
     --chain "$RELAYCHAIN" \
-    --disable-default-bootnode  > relaychain-template.json 2>/dev/null
-
-  RELAY_SPEC_TMPL="$(realpath relaychain-template.json)"
-  if ! [[ -f "$RELAY_SPEC_TMPL" ]]; then
-    echo "relaychain spec template - is not built"
-    exit 1
-  fi
+    --disable-default-bootnode > relaychain-template.json 2>/dev/null
+  RELAY_SPEC_TMPL="$(canonical_path relaychain-template.json)"
+  [ -f "$RELAY_SPEC_TMPL" ] || { echo "relaychain spec template - is not built"; exit 1; }
 fi
 echo "relaychain spec template - found: $RELAY_SPEC_TMPL"
 
 PARA_SPEC_TMPL="parachain-template.json"
 if [[ -f "$PARA_SPEC_TMPL" ]]; then
-  PARA_SPEC_TMPL="$(realpath "$PARA_SPEC_TMPL")"
+  PARA_SPEC_TMPL="$(canonical_path "$PARA_SPEC_TMPL")"
 else
   echo "parachain spec template - not found; trying to build"
   "$SPEC_BUILDER_BIN" create \
     -t local \
     --chain-name Parachain_1234 \
     --chain-id para1234 \
-    --relay-chain $RELAYCHAIN \
+    --relay-chain "$RELAYCHAIN" \
     --para-id 1234 \
-    --runtime $RUNTIME_WASM \
+    --runtime "$RUNTIME_WASM" \
     named-preset local_testnet
   mv chain_spec.json parachain-template.json
-
-  PARA_SPEC_TMPL="$(realpath parachain-template.json)"
-  if ! [[ -f "$PARA_SPEC_TMPL" ]]; then
-    echo "parachain spec template - is not built"
-    exit 1
-  fi
+  PARA_SPEC_TMPL="$(canonical_path parachain-template.json)"
+  [ -f "$PARA_SPEC_TMPL" ] || { echo "parachain spec template - is not built"; exit 1; }
 fi
 echo "parachain spec template - found: $PARA_SPEC_TMPL"
 
 SING_AND_SUBMIT_BIN="xtsend.proj/target/release/xtsend"
 if [[ -f "$SING_AND_SUBMIT_BIN" ]]; then
-  SING_AND_SUBMIT_BIN="$(realpath "$SING_AND_SUBMIT_BIN")"
-elif ! SING_AND_SUBMIT_BIN="$(command -v "xtsend" 2>/dev/null)"; then
+  SING_AND_SUBMIT_BIN="$(canonical_path "$SING_AND_SUBMIT_BIN")"
+elif ! SING_AND_SUBMIT_BIN="$(command -v xtsend 2>/dev/null)"; then
   echo "xtsend - not found; trying to build"
   mkdir -p xtsend.proj/src; cd xtsend.proj
-  cat<<'EOF'>Cargo.toml
+  cat > Cargo.toml <<'EOF'
 [package]
 name = "xtsend"
 version = "0.1.0"
@@ -218,15 +227,13 @@ subxt-signer = "0.44"
 rand = "0.8"
 EOF
 
- cat<<'EOF'>src/main.rs
+  cat > src/main.rs <<'EOF'
 use anyhow::Result;
-use std::{env};
+use std::env;
 use std::str::FromStr;
-
 use rand::{rngs::OsRng, RngCore};
-
-use subxt::{OnlineClient, config::polkadot::PolkadotConfig};
-use subxt_signer::{SecretUri, sr25519};
+use subxt::{config::polkadot::PolkadotConfig, OnlineClient};
+use subxt_signer::{sr25519, SecretUri};
 use subxt::tx::TxStatus;
 
 #[tokio::main]
@@ -262,46 +269,23 @@ async fn main() -> Result<()> {
 
     while let Some(status) = progress.next().await {
         match status? {
-            TxStatus::Validated => {
-                println!("[ ] Validated");
-            }
-            TxStatus::Broadcasted => {
-                println!("[>] Broadcasted");
-            }
-            TxStatus::NoLongerInBestBlock => {
-                println!("[ ] NoLongerInBestBlock");
-            }
+            TxStatus::Validated => println!("[ ] Validated"),
+            TxStatus::Broadcasted => println!("[>] Broadcasted"),
+            TxStatus::NoLongerInBestBlock => println!("[ ] NoLongerInBestBlock"),
             TxStatus::InBestBlock(info) => {
                 let hash = info.block_hash();
                 let block = api.blocks().at(hash).await?;
-                println!(
-                    "[*] InBestBlock    #{} {}",
-                    block.number(),
-                    hash
-                );
+                println!("[*] InBestBlock    #{} {}", block.number(), hash);
             }
             TxStatus::InFinalizedBlock(info) => {
                 let hash = info.block_hash();
                 let block = api.blocks().at(hash).await?;
-                println!(
-                    "[✓] FinalizedBlock #{} {}",
-                    block.number(),
-                    hash
-                );
+                println!("[✓] FinalizedBlock #{} {}", block.number(), hash);
                 break;
             }
-            TxStatus::Error { message } => {
-                println!("[x] Error: {message}");
-                break;
-            }
-            TxStatus::Invalid { message } => {
-                println!("[x] Invalid: {message}");
-                break;
-            }
-            TxStatus::Dropped { message } => {
-                println!("[x] Dropped: {message}");
-                break;
-            }
+            TxStatus::Error { message } => { println!("[x] Error: {message}"); break; }
+            TxStatus::Invalid { message } => { println!("[x] Invalid: {message}"); break; }
+            TxStatus::Dropped { message } => { println!("[x] Dropped: {message}"); break; }
         }
     }
     Ok(())
@@ -309,32 +293,21 @@ async fn main() -> Result<()> {
 EOF
 
   cargo build --release
-
-  SING_AND_SUBMIT_BIN="$(realpath target/release/xtsend)"
-  if ! [[ -f "$SING_AND_SUBMIT_BIN" ]]; then
-    echo "xtsend - is not built"
-    exit 1
-  fi
-  cd -
+  SING_AND_SUBMIT_BIN="$(canonical_path target/release/xtsend)"
+  [ -f "$SING_AND_SUBMIT_BIN" ] || { echo "xtsend - is not built"; exit 1; }
+  cd - >/dev/null
 fi
 echo "xtsend - found: $SING_AND_SUBMIT_BIN"
 
-
-
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
-
-
-
-# clean
-# Deletes only intermediate artifacts under $WORKDIR, keeping manifests/keys, *-raw.json, and shadow.yaml.
+# =====================
+# Cleanup intermediates
+# =====================
 clean() {
   dbg "clean"
-
-  if [ -z "${WORKDIR:-}" ]; then
-    echo "ERROR: WORKDIR is not set" >&2; return 1; fi
-  if [ ! -e "$WORKDIR" ]; then
-    echo "Nothing to clean: $WORKDIR does not exist"; return 0; fi
+  [ -n "${WORKDIR:-}" ] || { echo "ERROR: WORKDIR is not set" >&2; return 1; }
+  [ -e "$WORKDIR" ] || { echo "Nothing to clean: $WORKDIR does not exist"; return 0; }
 
   # Keep list (implicit by not touching them):
   #   - $WORKDIR/nodes/**
@@ -360,26 +333,23 @@ clean() {
   )
 
   # Remove files matching patterns (without touching directories or keeps)
-  local p
+  local p f
   for p in "${patterns[@]}"; do
     # shellcheck disable=SC2086
     for f in $p; do
       [ -e "$f" ] || continue
-      # Protect raw specs and shadow.yaml just in case
-      case "$f" in
-        *-raw.json|*/shadow.yaml) continue ;;
-      esac
-      if [ -d "$f" ]; then
-        continue
-      fi
+      case "$f" in *-raw.json|*/shadow.yaml) continue ;; esac
+      [ -d "$f" ] && continue
       dbg "rm -f -- $f"
       rm -f -- "$f" || { echo "ERROR: failed to remove $f" >&2; return 1; }
     done
   done
-
   dbg "Cleaned intermediates under $WORKDIR (kept nodes/, *-raw.json, shadow.yaml)"
 }
 
+# =====================
+# Manifests & keys
+# =====================
 # prepare_manifest <Index> <Name>
 # Prepares its manifest under $WORKDIR/nodes/<lower>/
 # Does NOT create p2p secret; only writes the intended node-key file path.
@@ -387,26 +357,14 @@ clean() {
 # each with {suri, public_hex, secret_hex, ss58}. No top-level grandpa/beefy sections. (each session key also carries its ss58)
 # Also includes: node_key_file, listen_address (without peer id suffix), rpc_port, prometheus_port.
 prepare_manifest() {
-  local index="${1:-}"
-  local name="${2:-}"
-  if ! printf '%s' "${index:-}" | grep -Eq '^[0-9]+$'; then
-    echo "prepare_manifest requires a non-negative integer index" >&2
-    return 1
-  fi
-  if [ -z "$name" ]; then
-    echo "prepare_manifest requires a non-empty node name" >&2
-    return 1
-  fi
-  dbg "prepare_manifest: index=$index name=$name"
-  if [ -z "${SUBKEY_BIN:-}" ] || [ ! -x "$SUBKEY_BIN" ]; then
-    echo "ERROR: SUBKEY_BIN is not set or not executable: '$SUBKEY_BIN'" >&2
-    return 1
-  fi
+  local index="${1:-}" name="${2:-}"
+  [[ "$index" =~ ^[0-9]+$ ]] || { echo "prepare_manifest: index int required" >&2; return 1; }
+  [ -n "$name" ] || { echo "prepare_manifest: name required" >&2; return 1; }
+  [ -x "$SUBKEY_BIN" ] || { echo "ERROR: SUBKEY_BIN not executable" >&2; return 1; }
 
-  local lower
-  lower="$(lc "$name")"
+  local lower; lower="$(lc "$name")"
   local node_dir="$WORKDIR/nodes/$lower"
-  mkdir -p "$node_dir" || { echo "ERROR: cannot create directory $node_dir" >&2; return 1; }
+  mkdir -p "$node_dir"
 
   # Port bases and computed ports
   local P2P_BASE=10000 RPC_BASE=20000 PROM_BASE=30000
@@ -419,92 +377,51 @@ prepare_manifest() {
   # We use the ed25519 secret hex as the libp2p node key material for dev.
   local ip_octet=$((index+1))
   local ip_prefix
-  if [ -n "${USE_LOCALHOST:-}" ]; then
-    ip_prefix="127.0.0"
-  else
-    ip_prefix="10.0.0"
-  fi
+  if [ -n "${USE_LOCALHOST:-}" ]; then ip_prefix="127.0.0"; else ip_prefix="10.0.0"; fi
   local listen_addr="/ip4/${ip_prefix}.${ip_octet}/tcp/${p2p_port}"
 
   # Helper to get keys
   get_key() {
-    local scheme="$1"
-    local suri="$2"
-    local out
-    if ! out="$("$SUBKEY_BIN" inspect --scheme "$scheme" "$suri" 2>&1)"; then
-      echo "ERROR: subkey inspect failed for scheme=$scheme suri=$suri" >&2
-      return 1
-    fi
-
-    local ss58
-    if [ "$scheme" = "ecdsa" ]; then
-      # Extract Public key (SS58)
+    local scheme="$1" suri="$2" out ss58
+    out="$("$SUBKEY_BIN" inspect --scheme "$scheme" "$suri" 2>&1)" || return 1
+    if [ "$scheme" = ecdsa ]; then
       ss58="$(printf '%s\n' "$out" | awk -F': ' 'BEGIN{IGNORECASE=1} /Public key \(SS58\)/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}')"
-      if [ -z "$ss58" ]; then
-        echo "ERROR: ecdsa Public key (SS58) not found for $suri" >&2
-        return 1
-      fi
     else
-      # sr25519 / ed25519 => SS58 Address
       ss58="$(printf '%s\n' "$out" | awk -F': ' 'BEGIN{IGNORECASE=1} /SS58[[:space:]]+Address/{gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}')"
-      if [ -z "$ss58" ]; then
-        echo "ERROR: SS58 Address not found for $scheme $suri" >&2
-        return 1
-      fi
     fi
-    dbg "get_key: scheme=$scheme suri=$suri -> ss58=${ss58}"
+    [ -n "$ss58" ] || { echo "ERROR: SS58 parse failed for $scheme $suri" >&2; return 1; }
     printf '%s' "$ss58"
   }
 
-  # Helper: get public_hex and secret_hex for a key
   get_hex_pair() {
-    # Prints: "<public_hex> <secret_hex>"
-    local scheme="$1" suri="$2"
-    local out pub sec
-    if ! out="$("$SUBKEY_BIN" inspect --scheme "$scheme" "$suri" 2>&1)"; then
-      echo "ERROR: subkey inspect failed for scheme=$scheme suri=$suri" >&2
-      return 1
-    fi
+    local scheme="$1" suri="$2" out pub sec
+    out="$("$SUBKEY_BIN" inspect --scheme "$scheme" "$suri" 2>&1)" || return 1
     pub="$(printf '%s\n' "$out" | awk -F': ' 'BEGIN{IGNORECASE=1}/Public key \(hex\)/{gsub(/^[ \\t]+|[ \\t]+$/, "", $2); print $2; exit}')"
     sec="$(printf '%s\n' "$out" | awk -F': ' 'BEGIN{IGNORECASE=1}/Secret key \(hex\)/{gsub(/^[ \\t]+|[ \\t]+$/, "", $2); print $2; exit}')"
-    if [ -z "$sec" ]; then
-      sec="$(printf '%s\n' "$out" | awk -F': ' 'BEGIN{IGNORECASE=1}/Secret seed/{gsub(/^[ \\t]+|[ \\t]+$/, "", $2); print $2; exit}')"
-    fi
-    if [ -z "$pub" ] || [ -z "$sec" ]; then
-      echo "ERROR: cannot parse public/secret hex for $scheme $suri" >&2
-      return 1
-    fi
+    [ -n "$sec" ] || sec="$(printf '%s\n' "$out" | awk -F': ' 'BEGIN{IGNORECASE=1}/Secret seed/{gsub(/^[ \\t]+|[ \\t]+$/, "", $2); print $2; exit}')"
+    [ -n "$pub" ] && [ -n "$sec" ] || { echo "ERROR: hex parse failed for $scheme $suri" >&2; return 1; }
     printf '%s %s' "$pub" "$sec"
   }
 
   local controller_ss58 grandpa_ss58 beefy_ss58 stash_ss58
   controller_ss58="$(get_key sr25519 "//$name")" || return 1
-  grandpa_ss58="$(get_key ed25519 "//$name")"    || return 1
-  beefy_ss58="$(get_key ecdsa   "//$name")"     || return 1
+  grandpa_ss58="$(get_key ed25519 "//$name")" || return 1
+  beefy_ss58="$(get_key ecdsa   "//$name")" || return 1
   stash_ss58="$(get_key sr25519 "//$name//stash")" || return 1
   dbg "ss58: controller=$controller_ss58 grandpa=$grandpa_ss58 beefy=$beefy_ss58 stash=$stash_ss58"
 
-  # Hex pairs for session roles
-  local sr_pub sr_sec ed_pub ed_sec ec_pub ec_sec
-  local tmp_pair
-  tmp_pair="$(get_hex_pair sr25519 "//$name")" || return 1
-  sr_pub="${tmp_pair%% *}"; sr_sec="${tmp_pair#* }"
-  tmp_pair="$(get_hex_pair ed25519 "//$name")" || return 1
-  ed_pub="${tmp_pair%% *}"; ed_sec="${tmp_pair#* }"
-  tmp_pair="$(get_hex_pair ecdsa "//$name")" || return 1
-  ec_pub="${tmp_pair%% *}"; ec_sec="${tmp_pair#* }"
-  # For stash, also capture pub/secret
-  local stash_pub stash_sec
-  tmp_pair="$(get_hex_pair sr25519 "//$name//stash")" || return 1
-  stash_pub="${tmp_pair%% *}"; stash_sec="${tmp_pair#* }"
+  local sr_pub sr_sec ed_pub ed_sec ec_pub ec_sec stash_pub stash_sec tmp_pair
+  tmp_pair="$(get_hex_pair sr25519 "//$name")"; sr_pub="${tmp_pair%% *}"; sr_sec="${tmp_pair#* }"
+  tmp_pair="$(get_hex_pair ed25519 "//$name")"; ed_pub="${tmp_pair%% *}"; ed_sec="${tmp_pair#* }"
+  tmp_pair="$(get_hex_pair ecdsa "//$name")";    ec_pub="${tmp_pair%% *}"; ec_sec="${tmp_pair#* }"
+  tmp_pair="$(get_hex_pair sr25519 "//$name//stash")"; stash_pub="${tmp_pair%% *}"; stash_sec="${tmp_pair#* }"
   dbg "hex: sr_pub=$sr_pub ed_pub=$ed_pub ec_pub=$ec_pub stash_pub=$stash_pub"
 
   # Derive PeerId from the ed25519 secret (hex) via stdin to polkadot (no fallbacks)
   local peer_id=""
   if command -v "$POLKADOT_BIN" >/dev/null 2>&1; then
     dbg "peerid: via polkadot key inspect-node-key (stdin)"
-    peer_id="$("$POLKADOT_BIN" key inspect-node-key <<<"${ed_sec}")" || peer_id=""
-    peer_id="$(printf '%s' "$peer_id" | tr -d '\r\n' | head -c 200)"
+    peer_id="$("$POLKADOT_BIN" key inspect-node-key <<<"${ed_sec}" 2>/dev/null | tr -d '\r\n' | head -c 200)" || peer_id=""
     dbg "peerid: result='${peer_id:-}'"
   fi
 
@@ -541,8 +458,8 @@ prepare_manifest() {
     --arg peer_id "$peer_id" \
     --argjson rpc_port "$rpc_port" \
     --argjson prometheus_port "$prom_port" \
-    --argjson session_keys "$session_json" \
-    '{
+    --argjson session_keys "$session_json" '
+    {
       name: $name,
       controller: { scheme: "sr25519", suri: $controller_suri, ss58: $controller_ss58, public_hex: $controller_pub, secret_hex: $controller_sec },
       stash:      { scheme: "sr25519", suri: $stash_suri,      ss58: $stash_ss58,      public_hex: $stash_pub,      secret_hex: $stash_sec },
@@ -552,21 +469,10 @@ prepare_manifest() {
       peer_id: $peer_id,
       rpc_port: $rpc_port,
       prometheus_port: $prometheus_port
-    }' > "$node_dir/manifest.json" || { echo "ERROR: failed to write manifest.json" >&2; return 1; }
-
-  if [ -f "$node_dir/manifest.json" ]; then
-    dbg "manifest ok; session_keys ss58: $(jq -rc '[.session_keys[]|{t:.type,s:.scheme,x:.ss58}]' "$node_dir/manifest.json" 2>/dev/null | cut -c1-200)"
-  else
-    echo "ERROR: manifest not found after write: $node_dir/manifest.json" >&2
-    return 1
-  fi
-
+    }' > "$node_dir/manifest.json"
   echo "Prepared manifest for $name (index $index): $node_dir/manifest.json"
 }
 
-
-# clean_dev_validators_patch <SPEC_JSON>
-# Clears validator session keys, balances, and bootNodes in the patch section.
 clean_dev_validators_patch() {
   local spec_path="$1"
   if [ -z "$spec_path" ] || [ ! -f "$spec_path" ]; then
@@ -1065,75 +971,15 @@ add_dev_collators_patch() {
 # replace_runtime_code <INPUT_SPEC.json> <OUTPUT_SPEC.json> [HEX_CODE]
 # Writes HEX_CODE (default: 0xdeadcode) into .genesis.runtimeGenesis.code, .genesis.raw.top["0x3a636f6465"], and .genesis.runtimeGenesis.patch.paras.paras[*][1][1], only if those keys exist.
 replace_runtime_code() {
-  local input_spec_path="$1"
-  local output_spec_path="$2"
-  local new_code="0xdeadcode"
-
-  # --- sanity checks (English comments for clarity) ---
-  if [ -z "$input_spec_path" ] || [ ! -f "$input_spec_path" ]; then
-    echo "replace_runtime_code: Input spec not found: $input_spec_path" >&2
-    return 1
-  fi
-  if [ -z "$output_spec_path" ]; then
-    echo "replace_runtime_code: Output spec path is required" >&2
-    return 1
-  fi
-
-  # Ensure hex code starts with 0x (not strictly required, but safer)
-  case "$new_code" in
-  0x*) : ;;
-  *) new_code="0x${new_code}" ;;
-  esac
-
-  # Only update keys if paths already exist (do not create any missing branches)
+replace_runtime_code() {
+  local input_spec_path="$1" output_spec_path="$2" new_code="${3:-0xdeadcode}"
+  [ -f "$input_spec_path" ] || { echo "input spec not found: $input_spec_path" >&2; return 1; }
+  [ -n "$output_spec_path" ] || { echo "output path required" >&2; return 1; }
   jq --arg code "$new_code" '
-    # Update .genesis.runtimeGenesis.code only if it already exists
-    (if (.genesis? // null) != null
-        and (.genesis.runtimeGenesis? // null) != null
-        and (.genesis.runtimeGenesis | has("code"))
-     then
-       .genesis.runtimeGenesis.code = $code
-     else
-       .
-     end)
-    |
-    # Update .genesis.raw.top["0x3a636f6465"] only if it already exists
-    (if (.genesis? // null) != null
-        and (.genesis.raw? // null) != null
-        and (.genesis.raw.top? // null) != null
-        and (.genesis.raw.top | has("0x3a636f6465"))
-     then
-       .genesis.raw.top["0x3a636f6465"] = $code
-     else
-       .
-     end)
-    |
-    # Update .genesis.runtimeGenesis.patch.paras.paras[*][1][1] only if the structure exists
-    (if (.genesis? // null) != null
-        and (.genesis.runtimeGenesis? // null) != null
-        and (.genesis.runtimeGenesis.patch? // null) != null
-        and (.genesis.runtimeGenesis.patch.paras? // null) != null
-        and (.genesis.runtimeGenesis.patch.paras.paras? // null) != null
-     then
-       .genesis.runtimeGenesis.patch.paras.paras =
-         (.genesis.runtimeGenesis.patch.paras.paras
-           | map(
-               if (type == "array"
-                   and length >= 2
-                   and (.[1] | type) == "array"
-                   and (.[1] | length) >= 2)
-               then
-                 (.[1][1] = $code)
-               else
-                 .
-               end
-             )
-         )
-     else
-       .
-     end)
+    (if (.genesis? // null) != null and (.genesis.runtimeGenesis? // null) != null and (.genesis.runtimeGenesis | has("code")) then .genesis.runtimeGenesis.code = $code else . end) |
+    (if (.genesis? // null) != null and (.genesis.raw? // null) != null and (.genesis.raw.top? // null) != null and (.genesis.raw.top | has("0x3a636f6465")) then .genesis.raw.top["0x3a636f6465"] = $code else . end) |
+    (if (.genesis? // null) != null and (.genesis.runtimeGenesis? // null) != null and (.genesis.runtimeGenesis.patch? // null) != null and (.genesis.runtimeGenesis.patch.paras? // null) != null and (.genesis.runtimeGenesis.patch.paras.paras? // null) != null then .genesis.runtimeGenesis.patch.paras.paras = (.genesis.runtimeGenesis.patch.paras.paras | map(if (type == "array" and length >= 2 and (.[1] | type) == "array" and (.[1] | length) >= 2) then (.[1][1] = $code) else . end)) else . end)
   ' "$input_spec_path" > "$output_spec_path"
-
   dbg "replace_runtime_code: output: $output_spec_path"
 }
 
@@ -1171,14 +1017,13 @@ provision_node_keys() {
   dbg "provision_node_keys: $base_path (chain: $chain_id) for $validator_name (from manifest) =="
 
   # --- session keys from manifest ---
+  # Mapping: babe->babe, imon->imon, audi->audi, para->para, asgn->asgn, gran->gran, beef->beef
   local ktype_map ktype kscheme suri
   local insert_fail=0
-  # Mapping: babe->babe, imon->imon, audi->audi, para->para, asgn->asgn, gran->gran, beef->beef
-  jq -c '.session_keys[]' "$node_dir/manifest.json" | while read -r key; do
+  while read -r key; do
     ktype="$(echo "$key" | jq -r '.type')"
     kscheme="$(echo "$key" | jq -r '.scheme')"
     suri="$(echo "$key" | jq -r '.suri')"
-    # Defensive: skip if missing
     [ -z "$ktype" ] && continue
     if "$POLKADOT_BIN" key insert \
       --base-path "$base_path" \
@@ -1192,7 +1037,8 @@ provision_node_keys() {
       insert_fail=1
       break
     fi
-  done
+  done < <(jq -c '.session_keys[]' "$node_dir/manifest.json")
+
   if [ "$insert_fail" -ne 0 ]; then
     return 1
   fi
@@ -1211,9 +1057,12 @@ provision_node_keys() {
 
   # --- read PeerId for log (prefer polkadot key inspect-node-key --file) ---
   local peer_id=""
-  if "$POLKADOT_BIN" key inspect-node-key --help 2>&1 | grep -q -- '--file'; then
-    peer_id="$("$POLKADOT_BIN" key inspect-node-key --file "$p2p_file" 2>/dev/null \
-      | awk -F': ' 'BEGIN{IGNORECASE=1}/Peer[[:space:]]*ID/{print $2; exit}')"
+#  if "$POLKADOT_BIN" key inspect-node-key --help 2>&1 | grep -q -- '--file'; then
+#    peer_id="$(cat "$p2p_file" | "$POLKADOT_BIN" key inspect-node-key --bin 2>/dev/null \
+#      | awk -F': ' 'BEGIN{IGNORECASE=1}/Peer[[:space:]]*ID/{print $2; exit}')"
+#  fi
+  if "$POLKADOT_BIN" key inspect-node-key --help 2>&1 | grep -q -- '--bin'; then
+    peer_id="$(cat "$p2p_file" | "$POLKADOT_BIN" key inspect-node-key --bin 2>/dev/null | tr -d '\r\n')"
   fi
   if [ -z "$peer_id" ]; then
     # Last resort: match 12D3Koo…-like
@@ -1224,280 +1073,152 @@ provision_node_keys() {
   echo "$validator_name provisioned by keys from manifest"
 }
 
-# patch_relay_with_paras <RELAY_SPEC_IN.json> <PARAS_FILE.json> <RELAY_SPEC_OUT.json>
-# Appends parachain entries from $PARAS_FILE into relay spec's patch.paras.paras
 patch_relay_with_paras() {
   local relay_in="$1" paras_json="$2" relay_out="$3"
-  if [ -z "$relay_in" ] || [ ! -f "$relay_in" ]; then
-    echo "patch_relay_with_paras: relay spec not found: $relay_in" >&2; return 1; fi
-  if [ -z "$paras_json" ] || [ ! -f "$paras_json" ]; then
-    echo "patch_relay_with_paras: paras file not found: $paras_json" >&2; return 1; fi
-  if [ -z "$relay_out" ]; then
-    echo "patch_relay_with_paras: output path required" >&2; return 1; fi
-
-  local tmp_out
-  tmp_out="$(mktemp "$WORKDIR/tmp.relayparas.XXXXXX")"; _tmp_files+=("$tmp_out")
+  [ -f "$relay_in" ] || { echo "relay spec not found: $relay_in" >&2; return 1; }
+  [ -f "$paras_json" ] || { echo "paras file not found: $paras_json" >&2; return 1; }
+  [ -n "$relay_out" ] || { echo "output path required" >&2; return 1; }
+  local tmp_out; tmp_out="$(mktemp_wrk tmp.relayparas.XXXXXX)"
   jq --slurpfile paras "$paras_json" '
-    .genesis                         //= {} |
-    .genesis.runtimeGenesis          //= {} |
-    .genesis.runtimeGenesis.patch    //= {} |
-    .genesis.runtimeGenesis.patch.paras        //= {} |
-    .genesis.runtimeGenesis.patch.paras.paras  = (
-      (.genesis.runtimeGenesis.patch.paras.paras // []) + $paras[0]
-    )
-    |
-    # cores = number of configured paras (at least 1)
+    .genesis //= {} |
+    .genesis.runtimeGenesis //= {} |
+    .genesis.runtimeGenesis.patch //= {} |
+    .genesis.runtimeGenesis.patch.paras //= {} |
+    .genesis.runtimeGenesis.patch.paras.paras = ((.genesis.runtimeGenesis.patch.paras.paras // []) + $paras[0]) |
     ((.genesis.runtimeGenesis.patch.paras.paras // []) | length) as $cores |
-    (
-      if ((.genesis? // null) != null
-          and (.genesis.runtimeGenesis? // null) != null
-          and (.genesis.runtimeGenesis.patch? // null) != null
-          and (.genesis.runtimeGenesis.patch.configuration? // null) != null
-          and (.genesis.runtimeGenesis.patch.configuration.config? // null) != null
-          and (.genesis.runtimeGenesis.patch.configuration.config.scheduler_params? // null) != null
-          and (.genesis.runtimeGenesis.patch.configuration.config.scheduler_params | has("num_cores")))
-      then
-        .genesis.runtimeGenesis.patch.configuration.config.scheduler_params.num_cores = (if $cores > 0 then $cores else 1 end)
-      else . end
-    )
-    |
-    (
-      if ((.genesis? // null) != null
-          and (.genesis.runtimeGenesis? // null) != null
-          and (.genesis.runtimeGenesis.patch? // null) != null
-          and (.genesis.runtimeGenesis.patch.configuration? // null) != null
-          and (.genesis.runtimeGenesis.patch.configuration.config? // null) != null
-          and (.genesis.runtimeGenesis.patch.configuration.config | has("minimum_backing_votes")))
-      then
-        .genesis.runtimeGenesis.patch.configuration.config.minimum_backing_votes = 2
-      else . end
-    )
-    |
-    (
-      if ((.genesis? // null) != null
-          and (.genesis.runtimeGenesis? // null) != null
-          and (.genesis.runtimeGenesis.patch? // null) != null
-          and (.genesis.runtimeGenesis.patch.configuration? // null) != null
-          and (.genesis.runtimeGenesis.patch.configuration.config? // null) != null
-          and (.genesis.runtimeGenesis.patch.configuration.config | has("needed_approvals")))
-      then
-        .genesis.runtimeGenesis.patch.configuration.config.needed_approvals = 2
-      else . end
-    )
+    (if (.genesis.runtimeGenesis.patch.configuration? // {} | .config? // {} | .scheduler_params? // {} | has("num_cores"))
+      then .genesis.runtimeGenesis.patch.configuration.config.scheduler_params.num_cores = (if $cores > 0 then $cores else 1 end) else . end) |
+    (if (.genesis.runtimeGenesis.patch.configuration? // {} | .config? // {} | has("minimum_backing_votes"))
+      then .genesis.runtimeGenesis.patch.configuration.config.minimum_backing_votes = 2 else . end) |
+    (if (.genesis.runtimeGenesis.patch.configuration? // {} | .config? // {} | has("needed_approvals"))
+      then .genesis.runtimeGenesis.patch.configuration.config.needed_approvals = 2 else . end)
   ' "$relay_in" > "$tmp_out" && mv -- "$tmp_out" "$relay_out"
   echo "Relay spec patched with parachain data → $relay_out"
 }
 
-# print_run_command <Name>
-# Prints a one-line command to start a node using data from the manifest
 print_validator_run_command() {
-  dbg print_validator_run_command $@
-
   local validator_name="$1"
-  if [ -z "$validator_name" ]; then
-    echo "Usage: print_run_command <Name>" >&2; return 1; fi
-
-  local lower node_dir base_path manifest
+  [ -n "$validator_name" ] || { echo "Usage: print_run_command <Name>" >&2; return 1; }
+  local lower node_dir base_path manifest spec_json chain_id listen_addr rpc_port prom_port node_key_hex p2p_file p2p_note=""
   lower="$(echo "$validator_name" | tr '[:upper:]' '[:lower:]')"
-  node_dir="$WORKDIR/nodes/$lower"
-  manifest="$node_dir/manifest.json"
-  base_path="$node_dir/base"
-
-  if [ ! -f "$manifest" ]; then
-    echo "ERROR: manifest not found for $validator_name at $manifest" >&2
-    return 1
-  fi
-
-  # prefer raw-spec if it exists, otherwise validator spec; else error
-  local spec_json
-  if [ -f "$WORKDIR/relaychain-raw.json" ]; then
-    spec_json="$WORKDIR/relaychain-raw.json"
-  else
-    echo "ERROR: spec json not found (expected $WORKDIR/relaychain-raw.json)" >&2
-    return 1
-  fi
-
-  # derive chain id (used to reference p2p secret location)
-  local chain_id
-  chain_id="$(jq -r '.id // empty' "$spec_json")"
-  if [ -z "$chain_id" ]; then
-    echo "ERROR: .id not found in $spec_json" >&2; return 1; fi
-
-  # read ports and listen address from manifest
-  local listen_addr rpc_port prom_port node_key_hex
+  node_dir="$WORKDIR/nodes/$lower"; manifest="$node_dir/manifest.json"; base_path="$node_dir/base"
+  [ -f "$manifest" ] || { echo "ERROR: manifest not found for $validator_name at $manifest" >&2; return 1; }
+  if [ -f "$WORKDIR/relaychain-raw.json" ]; then spec_json="$WORKDIR/relaychain-raw.json"; else echo "ERROR: spec json not found (expected $WORKDIR/relaychain-raw.json)" >&2; return 1; fi
+  chain_id="$(jq -r '.id // empty' "$spec_json")"; [ -n "$chain_id" ] || { echo "ERROR: .id not found in $spec_json" >&2; return 1; }
   listen_addr="$(jq -r '.listen_address // empty' "$manifest")"
   rpc_port="$(jq -r '.rpc_port // empty' "$manifest")"
   prom_port="$(jq -r '.prometheus_port // empty' "$manifest")"
   node_key_hex="$(jq -r '.node_key // empty' "$manifest")"
-  if [ -z "$listen_addr" ] || [ -z "$rpc_port" ] || [ -z "$prom_port" ] || [ -z "$node_key_hex" ]; then
-    echo "ERROR: manifest missing listen_address/node_key/rpc_port/prometheus_port" >&2
-    return 1
-  fi
-
-  # p2p secret file (optional: not required to pass on cmd if base-path is correct)
-  local p2p_file="$base_path/chains/$chain_id/network/secret_ed25519"
-  local p2p_note=""
-  [ -f "$p2p_file" ] || p2p_note=" # (warning: p2p secret not found yet; run provision_node_keys)"
-
-  # compose command (single line)
-  local cmd
-  cmd="SHADOW_TAG=\"$validator_name\" \"$POLKADOT_BIN\" \\
-    --validator \\
-    --name \"$validator_name\" \\
-    --base-path \"$base_path\" \\
-    --chain \"$spec_json\" \\
-    --listen-addr \"$listen_addr\" \\
-    --node-key \"$node_key_hex\" \\
-    --rpc-port $rpc_port \\
-    --rpc-cors all \\
-    --rpc-methods unsafe \\
-    --prometheus-port $prom_port \\
-    --prometheus-external \\
-    --no-mdns \\
-    --no-telemetry \\
-    --no-hardware-benchmarks \\
-    --insecure-validator-i-know-what-i-do \\
-    -l$LOGCFG > \"$validator_name.log\" 2>&1 &"
-  # print it nicely for copy-paste
-  echo "$cmd$p2p_note"
+  [ -n "$listen_addr" ] && [ -n "$rpc_port" ] && [ -n "$prom_port" ] && [ -n "$node_key_hex" ] || { echo "ERROR: manifest missing listen_address/node_key/rpc_port/prometheus_port" >&2; return 1; }
+  p2p_file="$base_path/chains/$chain_id/network/secret_ed25519"; [ -f "$p2p_file" ] || p2p_note=" # (warning: p2p secret not found yet; run provision_node_keys)"
+  cat <<CMD
+SHADOW_TAG="$validator_name" "$POLKADOT_BIN" \\
+  --validator \\
+  --name "$validator_name" \\
+  --base-path "$base_path" \\
+  --chain "$spec_json" \\
+  --listen-addr "$listen_addr" \\
+  --node-key "$node_key_hex" \\
+  --rpc-port $rpc_port \\
+  --rpc-cors all \\
+  --rpc-methods unsafe \\
+  --prometheus-port $prom_port \\
+  --prometheus-external \\
+  --no-mdns \\
+  --no-telemetry \\
+  --no-hardware-benchmarks \\
+  --insecure-validator-i-know-what-i-do \\
+  -l$LOGCFG > "$validator_name.log" 2>&1 &${p2p_note}
+CMD
 }
 
-# print_collator_run_command <Name> <PARACHAIN_SPEC_JSON>
-# Prints a one-line command to start a collator. Relay ports/RPC are ignored; node key may be temporary.
 print_collator_run_command() {
-  dbg print_collator_run_command $@
-
-  local collator_name="$1"
-  local para_spec_json="$2"
-  if [ -z "$collator_name" ] || [ -z "$para_spec_json" ]; then
-    echo "Usage: print_collator_run_command <Name> <PARACHAIN_SPEC_JSON>" >&2; return 1; fi
-  if [ ! -f "$para_spec_json" ]; then
-    echo "ERROR: parachain spec not found: $para_spec_json" >&2; return 1; fi
-
-  local lower node_dir base_path manifest
+  local collator_name="$1" para_spec_json="$2"
+  [ -n "$collator_name" ] && [ -n "$para_spec_json" ] && [ -f "$para_spec_json" ] || { echo "Usage: print_collator_run_command <Name> <PARACHAIN_SPEC_JSON>" >&2; return 1; }
+  local lower node_dir base_path manifest listen_addr rpc_port prom_port node_key_hex relay_spec_json
   lower="$(echo "$collator_name" | tr '[:upper:]' '[:lower:]')"
-  node_dir="$WORKDIR/nodes/$lower"
-  manifest="$node_dir/manifest.json"
-  base_path="$node_dir/base"
-
-  # Relay spec (not critical here): prefer RAW, else VAL
-  local relay_spec_json
-  if [ -f "$WORKDIR/relaychain-raw.json" ]; then
-    relay_spec_json="$WORKDIR/relaychain-raw.json"
-  else
-    relay_spec_json=""  # allowed to be empty per request
-  fi
-
-  # read ports and listen address from manifest
-  local listen_addr rpc_port prom_port node_key_hex
+  node_dir="$WORKDIR/nodes/$lower"; base_path="$node_dir/base"; manifest="$node_dir/manifest.json"
+  [ -f "$WORKDIR/relaychain-raw.json" ] && relay_spec_json="$WORKDIR/relaychain-raw.json" || relay_spec_json=""
   listen_addr="$(jq -r '.listen_address // empty' "$manifest")"
   rpc_port="$(jq -r '.rpc_port // empty' "$manifest")"
   prom_port="$(jq -r '.prometheus_port // empty' "$manifest")"
   node_key_hex="$(jq -r '.node_key // empty' "$manifest")"
-  if [ -z "$listen_addr" ] || [ -z "$rpc_port" ] || [ -z "$prom_port" ] || [ -z "$node_key_hex" ]; then
-    echo "ERROR: manifest missing listen_address/node_key/rpc_port/prometheus_port" >&2
-    return 1
-  fi
-
-  # compose command (single line). Relay args are optional and appended after `--` if available.
-  local cmd
-  cmd="SHADOW_TAG=\"$collator_name\" \"$COLLATOR_BIN\" \\
-    --collator \\
-    --force-authoring \\
-    --name \"$collator_name\" \\
-    --base-path \"$base_path\" \\
-    --chain \"$para_spec_json\" \\
-    --listen-addr \"$listen_addr\" \\
-    --node-key \"$node_key_hex\" \\
-    --rpc-port $rpc_port \\
-    --rpc-cors all \\
-    --rpc-methods unsafe \\
-    --prometheus-port $prom_port \\
-    --prometheus-external \\
-    --no-mdns \\
-    --no-telemetry \\
-    --no-hardware-benchmarks \\
-    -l$LOGCFG \\
-    -- \\
-    --base-path \"$base_path/../relay\" \\
-    --chain \"$relay_spec_json\" \\
-    --no-prometheus \\
-    --no-mdns \\
-    --no-telemetry \\
-    --no-hardware-benchmarks \\
-    -l$LOGCFG > \"$collator_name.log\" 2>&1 &"
-  echo "$cmd"
+  [ -n "$listen_addr" ] && [ -n "$rpc_port" ] && [ -n "$prom_port" ] && [ -n "$node_key_hex" ] || { echo "ERROR: manifest missing listen_address/node_key/rpc_port/prometheus_port" >&2; return 1; }
+  cat <<CMD
+SHADOW_TAG="$collator_name" "$COLLATOR_BIN" \\
+  --collator \\
+  --force-authoring \\
+  --name "$collator_name" \\
+  --base-path "$base_path" \\
+  --chain "$para_spec_json" \\
+  --listen-addr "$listen_addr" \\
+  --node-key "$node_key_hex" \\
+  --rpc-port $rpc_port \\
+  --rpc-cors all \\
+  --rpc-methods unsafe \\
+  --prometheus-port $prom_port \\
+  --prometheus-external \\
+  --no-mdns \\
+  --no-telemetry \\
+  --no-hardware-benchmarks \\
+  -l$LOGCFG \\
+  -- \\
+  --base-path "$base_path/../relay" \\
+  --chain "$relay_spec_json" \\
+  --no-prometheus \\
+  --no-mdns \\
+  --no-telemetry \\
+  --no-hardware-benchmarks \\
+  --no-beefy \\
+  -l$LOGCFG > "$collator_name.log" 2>&1 &
+CMD
 }
 
 print_run_commands() {
-  dbg print_run_commands
-
-  for ((v=0;v<VALIDATORS;v++)); do
-    echo
-    print_validator_run_command "Validator_$((v+1))" "$WORKDIR/relaychain-raw.json" || exit 1
-  done
-  for ((p=0;p<PARACHAINS;p++)); do
-    for ((c=0;c<COLLATORS;c++)); do
-      echo
-      print_collator_run_command "Collator_$((PARA_BASE+p))_$((c+1))" "$WORKDIR/parachain-$((PARA_BASE+p))-raw.json" || exit 1
-    done
+  for ((v=0; v<VALIDATORS; v++)); do echo; print_validator_run_command "Validator_$((v+1))"; done
+  for ((p=0; p<PARACHAINS; p++)); do
+    for ((c=0; c<COLLATORS; c++)); do echo; print_collator_run_command "Collator_$((PARA_BASE+p))_$((c+1))" "$WORKDIR/parachain-$((PARA_BASE+p))-raw.json"; done
   done
 }
 
-# generate_shadow_config
-# Produce Shadow YAML where each validator/collator runs on its own host.
-# Output: $WORKDIR/shadow.yaml
+# =====================
+# Shadow YAML generator
+# =====================
 generate_shadow_config() {
-  dbg generate_shadow_config
-
   local out="$WORKDIR/shadow.yaml"
-  mkdir -p -- "$WORKDIR" || { echo "ERROR: cannot mkdir -p $WORKDIR" >&2; return 1; }
+  mkdir -p -- "$WORKDIR"
 
-  # Build ordered list of host labels from actual node names
-  local host_labels=()
-  local name lower node_dir manifest
+  local host_labels=() name lower node_dir manifest
   for ((v=0; v<VALIDATORS; v++)); do
-    name="Validator_$((v+1))"
-    lower="$(lc "$name")"; node_dir="$WORKDIR/nodes/$lower"; manifest="$node_dir/manifest.json"
-    [ -f "$manifest" ] || { echo "WARN: manifest missing for $name: $manifest — skipping" >&2; continue; }
-    host_labels+=("$name")
+    name="Validator_$((v+1))"; lower="$(lc "$name")"; manifest="$WORKDIR/nodes/$lower/manifest.json"
+    [ -f "$manifest" ] && host_labels+=("$name") || echo "WARN: manifest missing for $name: $manifest — skipping" >&2
   done
   for ((p=0; p<PARACHAINS; p++)); do
     for ((c=0; c<COLLATORS; c++)); do
-      name="Collator_$((PARA_BASE+p))_$((c+1))"
-      lower="$(lc "$name")"; node_dir="$WORKDIR/nodes/$lower"; manifest="$node_dir/manifest.json"
-      [ -f "$manifest" ] || { echo "WARN: manifest missing for $name: $manifest — skipping" >&2; continue; }
-      host_labels+=("$name")
+      name="Collator_$((PARA_BASE+p))_$((c+1))"; lower="$(lc "$name")"; manifest="$WORKDIR/nodes/$lower/manifest.json"
+      [ -f "$manifest" ] && host_labels+=("$name") || echo "WARN: manifest missing for $name: $manifest — skipping" >&2
     done
   done
   local total_hosts="${#host_labels[@]}"
 
-  # Header + detailed full-mesh graph in GML (nodes 1..N correspond to host_labels order)
   {
     printf 'general:\n'
     printf '  stop_time: "20 min"\n'
-    printf '  model_unblocked_syscall_latency: true\n'
-
-    printf '\n'
+    printf '  model_unblocked_syscall_latency: true\n\n'
     printf 'experimental:\n'
     printf '  native_preemption_enabled: true\n'
     printf '  unblocked_syscall_latency: "1 microseconds"\n'
-#    printf '  strace_logging_mode: deterministic\n'
     printf '  report_errors_to_stderr: true\n'
-#    printf '  use_new_tcp: true\n'
     printf '  socket_send_autotune: true\n'
     printf '  socket_recv_autotune: true\n'
     printf '  socket_send_buffer: "4 MiB"\n'
-    printf '  socket_recv_buffer: "4 MiB"\n'
-
-    printf '\n'
+    printf '  socket_recv_buffer: "4 MiB"\n\n'
     printf 'network:\n'
     printf '  graph:\n'
     printf '    type: gml\n'
     printf '    inline: |\n'
     printf '      graph [\n'
     printf '        directed 0\n'
-    # nodes with labels
     local i j
     for ((i=1; i<=total_hosts; i++)); do
       printf '        node [\n'
@@ -1507,15 +1228,8 @@ generate_shadow_config() {
       printf '          host_bandwidth_down "1 Gbit"\n'
       printf '        ]\n'
     done
-    # full mesh with self-edges; undirected (directed 0)
     for ((i=1; i<=total_hosts; i++)); do
-      # self-edge to define loopback characteristics
-      printf '        edge [\n'
-      printf '          source %d\n' "$i"
-      printf '          target %d\n' "$i"
-      printf '          latency "1 ms"\n'
-      printf '          packet_loss 0.0\n'
-      printf '        ]\n'
+      printf '        edge [\n'; printf '          source %d\n' "$i"; printf '          target %d\n' "$i"; printf '          latency "1 ms"\n'; printf '          packet_loss 0.0\n'; printf '        ]\n'
     done
     for ((i=1; i<=total_hosts; i++)); do
       for ((j=i+1; j<=total_hosts; j++)); do
@@ -1527,257 +1241,154 @@ generate_shadow_config() {
         printf '        ]\n'
       done
     done
-    printf '      ]\n'
-    printf '\n'
+    printf '      ]\n\n'
     printf 'hosts:\n'
   } >"$out"
 
-  local ip_prefix
-  if [ -n "${USE_LOCALHOST:-}" ]; then
-    ip_prefix="127.0.0"
-  else
-    ip_prefix="10.0.0"
-  fi
-  local ip_octet=1
-  local lower node_dir base_path manifest listen_addr rpc_port prom_port node_key_hex spec_json relay_spec_json name host
+  local ip_prefix ip_octet=1 lower base_path listen_addr rpc_port prom_port node_key_hex relay_spec_json host host_key net_id=1
+  if [ -n "${USE_LOCALHOST:-}" ]; then ip_prefix="127.0.0"; else ip_prefix="10.0.0"; fi
+  [ -f "$WORKDIR/relaychain-raw.json" ] && relay_spec_json="$WORKDIR/relaychain-raw.json" || relay_spec_json=""
 
-  # Prefer RAW relay spec if exists, else VAL spec (path used by collators after --)
-  if [ -f "$WORKDIR/relaychain-raw.json" ]; then
-    relay_spec_json="$WORKDIR/relaychain-raw.json"
-  fi
-
-  # Start network node id counter
-  local net_id=1
-
-  #############################
-  # Validators → one host each
-  #############################
+  # Validators
   for ((v=0; v<VALIDATORS; v++)); do
-    name="Validator_$((v+1))"
-    lower="$(lc "$name")"
-    node_dir="$WORKDIR/nodes/$lower"
-    base_path="$node_dir/base"
-    manifest="$node_dir/manifest.json"
-
-    if [ ! -f "$manifest" ]; then
-      echo "WARN: manifest missing for $name: $manifest — skipping" >&2; continue
-    fi
-
-    listen_addr="$(jq -r '.listen_address // empty' "$manifest")"
-    rpc_port="$(jq -r '.rpc_port // empty' "$manifest")"
-    prom_port="$(jq -r '.prometheus_port // empty' "$manifest")"
-    node_key_hex="$(jq -r '.node_key // empty' "$manifest")"
-
-    # Validators always use the relay RAW (already generated below in the script)
-    spec_json="$WORKDIR/relaychain-raw.json"
-
-    host="$name"
-    local host_key
-    host_key="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | tr '_' '-')"
-    printf '  %s:\n' "$host_key" >>"$out"
-    printf '    network_node_id: %d\n' "$net_id" >>"$out"
-    printf '    ip_addr: %s.%d\n' "$ip_prefix" "$ip_octet" >>"$out"
-    printf '    processes:\n' >>"$out"
-    printf '      - path: %s\n' "$POLKADOT_BIN" >>"$out"
-    printf '        args: [\n' >>"$out"
-    printf '          "--validator",\n' >>"$out"
-    printf '          "--name", "%s",\n' "$name" >>"$out"
-    printf '          "--base-path", "%s",\n' "$base_path" >>"$out"
-    printf '          "--chain", "%s",\n' "$spec_json" >>"$out"
-    printf '          "--listen-addr", "%s",\n' "$listen_addr" >>"$out"
-    printf '          "--node-key", "%s",\n' "$node_key_hex" >>"$out"
-    printf '          "--rpc-port", "%s",\n' "$rpc_port" >>"$out"
-    printf '          "--prometheus-port", "%s",\n' "$prom_port" >>"$out"
-    printf '          "--prometheus-external",\n' >>"$out"
-    printf '          "--no-mdns",\n' >>"$out"
-    printf '          "--no-telemetry",\n' >>"$out"
-    printf '          "--no-hardware-benchmarks",\n' >>"$out"
-    printf '          "--no-beefy",\n' >>"$out"
-    printf '          "--insecure-validator-i-know-what-i-do",\n' >>"$out"
-    printf '          "-l%s"\n' "$LOGCFG" >>"$out"
-    printf '        ]\n' >>"$out"
-    printf '        environment:\n' >>"$out"
-    printf '          RUST_BACKTRACE: "1"\n' >>"$out"
-    printf '          COLORBT_SHOW_HIDDEN: "1"\n' >>"$out"
-    printf '          RUST_STDOUT_FLUSH_ON_WRITE: "1"\n' >>"$out"
-    printf '          RUST_LOG: "%s"\n' "$LOGCFG" >>"$out"
-    printf '          SHADOW_TAG: "%s"\n' "$host" >>"$out"
-    printf '        expected_final_state: running\n' >>"$out"
-
-    ip_octet=$((ip_octet+1))
-    net_id=$((net_id+1))
+    name="Validator_$((v+1))"; lower="$(lc "$name")"; base_path="$WORKDIR/nodes/$lower/base"; manifest="$WORKDIR/nodes/$lower/manifest.json"
+    [ -f "$manifest" ] || { echo "WARN: manifest missing for $name: $manifest — skipping" >&2; continue; }
+    listen_addr="$(jq -r '.listen_address // empty' "$manifest")"; rpc_port="$(jq -r '.rpc_port // empty' "$manifest")"; prom_port="$(jq -r '.prometheus_port // empty' "$manifest")"; node_key_hex="$(jq -r '.node_key // empty' "$manifest")"
+    host="$name"; host_key="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | tr '_' '-')"
+    {
+      printf '  %s:\n' "$host_key"
+      printf '    network_node_id: %d\n' "$net_id"
+      printf '    ip_addr: %s.%d\n' "$ip_prefix" "$ip_octet"
+      printf '    processes:\n'
+      printf '      - path: %s\n' "$POLKADOT_BIN"
+      printf '        args: [\n'
+      printf '          "--validator",\n'
+      printf '          "--name", "%s",\n' "$name"
+      printf '          "--base-path", "%s",\n' "$base_path"
+      printf '          "--chain", "%s",\n' "$WORKDIR/relaychain-raw.json"
+      printf '          "--listen-addr", "%s",\n' "$listen_addr"
+      printf '          "--node-key", "%s",\n' "$node_key_hex"
+      printf '          "--rpc-port", "%s",\n' "$rpc_port"
+      printf '          "--prometheus-port", "%s",\n' "$prom_port"
+      printf '          "--prometheus-external",\n'
+      printf '          "--no-mdns",\n'
+      printf '          "--no-telemetry",\n'
+      printf '          "--no-hardware-benchmarks",\n'
+      printf '          "--no-beefy",\n'
+      printf '          "--insecure-validator-i-know-what-i-do",\n'
+      printf '          "-l%s"\n' "$LOGCFG"
+      printf '        ]\n'
+      printf '        environment:\n'
+      printf '          RUST_BACKTRACE: "1"\n'
+      printf '          COLORBT_SHOW_HIDDEN: "1"\n'
+      printf '          RUST_STDOUT_FLUSH_ON_WRITE: "1"\n'
+      printf '          RUST_LOG: "%s"\n' "$LOGCFG"
+      printf '          SHADOW_TAG: "%s"\n' "$host"
+      printf '        expected_final_state: running\n'
+    } >>"$out"
+    ip_octet=$((ip_octet+1)); net_id=$((net_id+1))
   done
 
-  #############################
-  # Collators → one host each
-  #############################
+  # Collators
   for ((p=0; p<PARACHAINS; p++)); do
-    id=$((PARA_BASE+p))
-    # Parachain RAW spec path (assembled earlier in the script)
-    local para_raw="$WORKDIR/parachain-$id-raw.json"
-
+    local id=$((PARA_BASE+p)) para_raw="$WORKDIR/parachain-$id-raw.json"
     for ((c=0; c<COLLATORS; c++)); do
-      name="Collator_$((PARA_BASE+p))_$((c+1))"
-      lower="$(lc "$name")"
-      node_dir="$WORKDIR/nodes/$lower"
-      base_path="$node_dir/base"
-      manifest="$node_dir/manifest.json"
-
-      if [ ! -f "$manifest" ]; then
-        echo "WARN: manifest missing for $name: $manifest — skipping" >&2; continue
-      fi
-
-      listen_addr="$(jq -r '.listen_address // empty' "$manifest")"
-      rpc_port="$(jq -r '.rpc_port // empty' "$manifest")"
-      prom_port="$(jq -r '.prometheus_port // empty' "$manifest")"
-      node_key_hex="$(jq -r '.node_key // empty' "$manifest")"
-
-      host="$name"
-      local host_key
-      host_key="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | tr '_' '-')"
-      printf '  %s:\n' "$host_key" >>"$out"
-      printf '    network_node_id: %d\n' "$net_id" >>"$out"
-      printf '    ip_addr: %s.%d\n' "$ip_prefix" "$ip_octet" >>"$out"
-      printf '    processes:\n' >>"$out"
-      printf '      - path: %s\n' "$COLLATOR_BIN" >>"$out"
-      printf '        args: [\n' >>"$out"
-      printf '          "--collator",\n' >>"$out"
-      printf '          "--force-authoring",\n' >>"$out"
-      printf '          "--name", "%s",\n' "$name" >>"$out"
-      printf '          "--base-path", "%s",\n' "$base_path" >>"$out"
-      printf '          "--chain", "%s",\n' "$para_raw" >>"$out"
-      printf '          "--listen-addr", "%s",\n' "$listen_addr" >>"$out"
-      printf '          "--node-key", "%s",\n' "$node_key_hex" >>"$out"
-      printf '          "--rpc-port", "%s",\n' "$rpc_port" >>"$out"
-      printf '          "--prometheus-port", "%s",\n' "$prom_port" >>"$out"
-      printf '          "--prometheus-external",\n' >>"$out"
-      printf '          "--no-mdns",\n' >>"$out"
-      printf '          "--no-telemetry",\n' >>"$out"
-      printf '          "--no-hardware-benchmarks",\n' >>"$out"
-      printf '          "-l%s",\n' "$LOGCFG" >>"$out"
-      printf '          "--",\n' >>"$out"
-      printf '          "--base-path", "%s/../relay",\n' "$base_path" >>"$out"
-      printf '          "--chain", "%s",\n' "$relay_spec_json" >>"$out"
-      printf '          "--no-prometheus",\n' >>"$out"
-      printf '          "--no-mdns",\n' >>"$out"
-      printf '          "--no-telemetry",\n' >>"$out"
-      printf '          "--no-hardware-benchmarks",\n' >>"$out"
-      printf '          "--no-beefy",\n' >>"$out"
-      printf '          "-l%s"\n' "$LOGCFG" >>"$out"
-      printf '        ]\n' >>"$out"
-      printf '        environment:\n' >>"$out"
-      printf '          RUST_BACKTRACE: "1"\n' >>"$out"
-      printf '          COLORBT_SHOW_HIDDEN: "1"\n' >>"$out"
-      printf '          RUST_STDOUT_FLUSH_ON_WRITE: "1"\n' >>"$out"
-      printf '          RUST_LOG: "%s"\n' "$LOGCFG" >>"$out"
-      printf '          SHADOW_TAG: "%s"\n' "$host" >>"$out"
-      printf '        expected_final_state: running\n' >>"$out"
-
-      ip_octet=$((ip_octet+1))
-      net_id=$((net_id+1))
+      name="Collator_$((PARA_BASE+p))_$((c+1))"; lower="$(lc "$name")"; base_path="$WORKDIR/nodes/$lower/base"; manifest="$WORKDIR/nodes/$lower/manifest.json"
+      [ -f "$manifest" ] || { echo "WARN: manifest missing for $name: $manifest — skipping" >&2; continue; }
+      listen_addr="$(jq -r '.listen_address // empty' "$manifest")"; rpc_port="$(jq -r '.rpc_port // empty' "$manifest")"; prom_port="$(jq -r '.prometheus_port // empty' "$manifest")"; node_key_hex="$(jq -r '.node_key // empty' "$manifest")"
+      host="$name"; host_key="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | tr '_' '-')"
+      {
+        printf '  %s:\n' "$host_key"
+        printf '    network_node_id: %d\n' "$net_id"
+        printf '    ip_addr: %s.%d\n' "$ip_prefix" "$ip_octet"
+        printf '    processes:\n'
+        printf '      - path: %s\n' "$COLLATOR_BIN"
+        printf '        args: [\n'
+        printf '          "--collator",\n'
+        printf '          "--force-authoring",\n'
+        printf '          "--name", "%s",\n' "$name"
+        printf '          "--base-path", "%s",\n' "$base_path"
+        printf '          "--chain", "%s",\n' "$para_raw"
+        printf '          "--listen-addr", "%s",\n' "$listen_addr"
+        printf '          "--node-key", "%s",\n' "$node_key_hex"
+        printf '          "--rpc-port", "%s",\n' "$rpc_port"
+        printf '          "--prometheus-port", "%s",\n' "$prom_port"
+        printf '          "--prometheus-external",\n'
+        printf '          "--no-mdns",\n'
+        printf '          "--no-telemetry",\n'
+        printf '          "--no-hardware-benchmarks",\n'
+        printf '          "-l%s",\n' "$LOGCFG"
+        printf '          "--",\n'
+        printf '          "--base-path", "%s/../relay",\n' "$base_path"
+        printf '          "--chain", "%s",\n' "$relay_spec_json"
+        printf '          "--no-prometheus",\n'
+        printf '          "--no-mdns",\n'
+        printf '          "--no-telemetry",\n'
+        printf '          "--no-hardware-benchmarks",\n'
+        printf '          "--no-beefy",\n'
+        printf '          "-l%s"\n' "$LOGCFG"
+        printf '        ]\n'
+        printf '        environment:\n'
+        printf '          RUST_BACKTRACE: "1"\n'
+        printf '          COLORBT_SHOW_HIDDEN: "1"\n'
+        printf '          RUST_STDOUT_FLUSH_ON_WRITE: "1"\n'
+        printf '          RUST_LOG: "%s"\n' "$LOGCFG"
+        printf '          SHADOW_TAG: "%s"\n' "$host"
+        printf '        expected_final_state: running\n'
+      } >>"$out"
+      ip_octet=$((ip_octet+1)); net_id=$((net_id+1))
     done
   done
-
   echo "Shadow config written: $out"
 }
 
-# Generate manifests for validators
-for ((v=0;v<VALIDATORS;v++)); do
-  prepare_manifest "$v" "Validator_$((v+1))" || exit 1
-done
-
-# Generate manifests for collators
-for ((p=0;p<PARACHAINS;p++)); do
-  for ((c=0;c<COLLATORS;c++)); do
+# =====================
+# Pipeline
+# =====================
+for ((v=0; v<VALIDATORS; v++)); do prepare_manifest "$v" "Validator_$((v+1))"; done
+for ((p=0; p<PARACHAINS; p++)); do
+  for ((c=0; c<COLLATORS; c++)); do
     i=$((VALIDATORS + (p * COLLATORS) + c))
-    prepare_manifest "$i" "Collator_$((PARA_BASE+p))_$((c+1))" || exit 1
+    prepare_manifest "$i" "Collator_$((PARA_BASE+p))_$((c+1))"
   done
 done
 
-
-# Copy template chainspecs
 cp -a "$PARA_SPEC_TMPL" "$WORKDIR/parachain.json"
 cp -a "$RELAY_SPEC_TMPL" "$WORKDIR/relaychain.json"
 
-
-# Patch spec by validators
-
 cp "$WORKDIR/relaychain.json" "$WORKDIR/relaychain-val.json"
 clean_dev_validators_patch "$WORKDIR/relaychain-val.json"
-for ((v=0;v<VALIDATORS;v++)); do
-  add_dev_validators_patch "$WORKDIR/relaychain-val.json" "Validator_$((v+1))" || exit 1
-done
+for ((v=0; v<VALIDATORS; v++)); do add_dev_validators_patch "$WORKDIR/relaychain-val.json" "Validator_$((v+1))"; done
 
-# no-code spec for debugging
 replace_runtime_code "$WORKDIR/relaychain.json" "$WORKDIR/relaychain-no-code.json"
 replace_runtime_code "$WORKDIR/relaychain-val.json" "$WORKDIR/relaychain-val-no-code.json"
 replace_runtime_code "$WORKDIR/parachain.json" "$WORKDIR/parachain-no-code.json"
 
-# Generate parachain artifacts
-
-paras_file="$WORKDIR/paras.json"
-printf '[]' > "$paras_file"
+paras_file="$WORKDIR/paras.json"; printf '[]' > "$paras_file"
 
 for ((p=0; p<PARACHAINS; p++)); do
   id=$((PARA_BASE+p))
-  gfile="$WORKDIR/para-${id}-genesis"
-  wfile="$WORKDIR/para-${id}-wasm"
-
+  gfile="$WORKDIR/para-${id}-genesis"; wfile="$WORKDIR/para-${id}-wasm"
   cp "$PARA_SPEC_TMPL" "$WORKDIR/parachain-$id.json"
-
-  dbg clean_dev_collators_patch "$WORKDIR/parachain-$id.json" "$id"
   clean_dev_collators_patch "$WORKDIR/parachain-$id.json" "$id"
-
-  for ((c=0;c<COLLATORS;c++)); do
-    dbg add_dev_collators_patch "$WORKDIR/parachain-$id.json" "Collator_$((PARA_BASE+p))_$((c+1))"
-    add_dev_collators_patch "$WORKDIR/parachain-$id.json" "Collator_$((PARA_BASE+p))_$((c+1))" || exit 1
-  done
-
+  for ((c=0; c<COLLATORS; c++)); do add_dev_collators_patch "$WORKDIR/parachain-$id.json" "Collator_$((PARA_BASE+p))_$((c+1))"; done
   "$COLLATOR_BIN" export-genesis-state --chain "$WORKDIR/parachain-$id.json" "$gfile" >/dev/null 2>/dev/null
   "$COLLATOR_BIN" export-genesis-wasm  --chain "$WORKDIR/parachain-$id.json" "$wfile" >/dev/null 2>/dev/null
-
-  tmp_paras="$(mktemp)"; _tmp_files+=("$tmp_paras")
-  jq --rawfile gh "$gfile" --rawfile vc "$wfile" --argjson id "$id" \
-    '. + [[ $id, [ ($gh|gsub("[\r\n]";"")), ($vc|gsub("[\r\n]";"")), true ] ]]' \
-    "$paras_file" > "$tmp_paras"
-  mv -- "$tmp_paras" "$paras_file"
-
+  tmp_paras="$(mktemp_wrk tmp.paras.XXXXXX)"
+  jq --rawfile gh "$gfile" --rawfile vc "$wfile" --argjson id "$id" '. + [[ $id, [ ($gh|gsub("[\r\n]";"")), ($vc|gsub("[\r\n]";"")), true ] ]]' "$paras_file" > "$tmp_paras" && mv -- "$tmp_paras" "$paras_file"
   "$COLLATOR_BIN" build-spec --chain "$WORKDIR/parachain-$id.json" --disable-default-bootnode --raw > "$WORKDIR/parachain-$id-raw.json" 2>/dev/null
   replace_runtime_code "$WORKDIR/parachain-$id.json" "$WORKDIR/parachain-$id-no-code.json"
 done
 
-# Patch relay (validators spec) with collected parachain entries
-patch_relay_with_paras "$WORKDIR/relaychain-val.json" "$paras_file" "$WORKDIR/relaychain-val-paras.json" || exit 1
+patch_relay_with_paras "$WORKDIR/relaychain-val.json" "$paras_file" "$WORKDIR/relaychain-val-paras.json"
 replace_runtime_code "$WORKDIR/relaychain-val-paras.json" "$WORKDIR/relaychain-val-paras-no-code.json"
-
-# Generate raw-spec
 "$POLKADOT_BIN" build-spec --chain "$WORKDIR/relaychain-val-paras.json" --raw > "$WORKDIR/relaychain-raw.json" 2>/dev/null
 
-# Provide keys for validators
-for ((v=0;v<VALIDATORS;v++)); do
-  provision_node_keys "Validator_$((v+1))" "$WORKDIR/relaychain-raw.json" || exit 1
+for ((v=0; v<VALIDATORS; v++)); do provision_node_keys "Validator_$((v+1))" "$WORKDIR/relaychain-raw.json"; done
+for ((p=0; p<PARACHAINS; p++)); do
+  for ((c=0; c<COLLATORS; c++)); do id=$((PARA_BASE+p)); provision_node_keys "Collator_$((PARA_BASE+p))_$((c+1))" "$WORKDIR/parachain-$id-raw.json"; done
 done
 
-# Provide keys for collators
-for ((p=0;p<PARACHAINS;p++)); do
-  for ((c=0;c<COLLATORS;c++)); do
-    id=$((PARA_BASE+p))
-    provision_node_keys "Collator_$((PARA_BASE+p))_$((c+1))" "$WORKDIR/parachain-$id-raw.json" || exit 1
-  done
-done
-
-# Clean
 clean
-
-# Print run commands
 print_run_commands
-
-# Generate Shadow simulation YAML
-generate_shadow_config || exit 1
-
-#    echo "#################################################################################################"
-#    echo "##################    Simulation: $VALIDATORS validators + $PARACHAINS parachains * $COLLATORS collators    ##################"
-#    echo "#################################################################################################"
-#    cat $WORKDIR/shadow.yaml
-#    echo "##################################################################################################"
-
+generate_shadow_config
