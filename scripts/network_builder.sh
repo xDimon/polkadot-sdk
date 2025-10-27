@@ -971,7 +971,6 @@ add_dev_collators_patch() {
 # replace_runtime_code <INPUT_SPEC.json> <OUTPUT_SPEC.json> [HEX_CODE]
 # Writes HEX_CODE (default: 0xdeadcode) into .genesis.runtimeGenesis.code, .genesis.raw.top["0x3a636f6465"], and .genesis.runtimeGenesis.patch.paras.paras[*][1][1], only if those keys exist.
 replace_runtime_code() {
-replace_runtime_code() {
   local input_spec_path="$1" output_spec_path="$2" new_code="${3:-0xdeadcode}"
   [ -f "$input_spec_path" ] || { echo "input spec not found: $input_spec_path" >&2; return 1; }
   [ -n "$output_spec_path" ] || { echo "output path required" >&2; return 1; }
@@ -1050,6 +1049,7 @@ provision_node_keys() {
   mkdir -p "$p2p_dir" || { echo "ERROR: cannot mkdir -p $p2p_dir" >&2; return 1; }
   local node_key_hex
   node_key_hex="$(jq -r '.node_key // empty' "$node_dir/manifest.json")"
+  dbg "node_key_hex set (len: ${#node_key_hex})"
   if [ -z "$node_key_hex" ]; then echo "ERROR: node_key not found in manifest" >&2; return 1; fi
   printf '%s' "$node_key_hex" | xxd -r -p > "$p2p_file" || { echo "ERROR: failed to write p2p secret from manifest" >&2; return 1; }
   chmod 600 "$p2p_file"
