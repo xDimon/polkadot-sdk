@@ -77,8 +77,8 @@ RELAYCHAIN="${RELAYCHAIN:-westend-local}"
 PARA_BASE=${PARA_BASE:-2000}
 
 # --- host bandwidth (для всех хостов)
-HOST_BW_UP="${HOST_BW_UP:-1 Gbit}"
-HOST_BW_DOWN="${HOST_BW_DOWN:-1 Gbit}"
+HOST_BW_UP="${HOST_BW_UP:-50 Mbit}"
+HOST_BW_DOWN="${HOST_BW_DOWN:-50 Mbit}"
 
 # --- pov bloater
 XTSEND_PAYLOAD_BYTES="${XTSEND_PAYLOAD_BYTES:-1000000}" # 1Mb
