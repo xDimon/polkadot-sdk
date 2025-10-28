@@ -217,6 +217,7 @@ else
 fi
 echo "parachain spec template - found: $PARA_SPEC_TMPL"
 
+mkdir xtsend.proj
 XTSEND_BIN="xtsend.proj/target/release/xtsend"
 if [[ -f "$XTSEND_BIN" ]]; then
   XTSEND_BIN="$(canonical_path "$XTSEND_BIN")"
