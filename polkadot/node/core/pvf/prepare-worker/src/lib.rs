@@ -712,7 +712,7 @@ fn handle_child_process(
 							feature = "jemalloc-allocator"
 						))]
 						memory_tracker_stats,
-						#[cfg(target_os = "linux")]
+						#[cfg(all(target_os = "linux", not(feature = "x-shadow")))]
 						max_rss: extract_max_rss_stat(max_rss, process::id()),
 						// Negative peak allocation values are legit; they are narrow
 						// corner cases and shouldn't affect overall statistics

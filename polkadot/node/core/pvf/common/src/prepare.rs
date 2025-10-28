@@ -62,7 +62,7 @@ pub struct MemoryStats {
 	))]
 	pub memory_tracker_stats: Option<MemoryAllocationStats>,
 	/// `ru_maxrss` from `getrusage`. `None` if an error occurred.
-	#[cfg(target_os = "linux")]
+	#[cfg(all(target_os = "linux", not(feature = "x-shadow")))]
 	pub max_rss: Option<i64>,
 	/// Peak allocation in bytes measured by tracking allocator
 	pub peak_tracked_alloc: u64,
