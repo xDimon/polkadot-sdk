@@ -109,7 +109,7 @@ require_cmd xxd
 POLKADOT_BIN="$POLKADOT_REPO/target/testnet/polkadot"
 if [[ -f "$POLKADOT_BIN" ]]; then
   POLKADOT_BIN="$(canonical_path "$POLKADOT_BIN")"
-elif ! POLKADOT_BIN="$(command -v polkadot 2>/dev/null)"; then
+else #elif ! POLKADOT_BIN="$(command -v polkadot 2>/dev/null)"; then
   echo "polkadot - not found; trying to build"
   cd "$POLKADOT_REPO"
   cargo build --profile testnet --features x-shadow -p polkadot
@@ -124,7 +124,7 @@ echo "polkadot - found: $POLKADOT_BIN"
 COLLATOR_BIN="$POLKADOT_REPO/target/testnet/polkadot-parachain"
 if [[ -f "$COLLATOR_BIN" ]]; then
   COLLATOR_BIN="$(canonical_path "$COLLATOR_BIN")"
-elif ! COLLATOR_BIN="$(command -v polkadot-parachain 2>/dev/null)"; then
+else #elif ! COLLATOR_BIN="$(command -v polkadot-parachain 2>/dev/null)"; then
   echo "polkadot-parachain - not found; trying to build"
   cd "$POLKADOT_REPO"
   cargo build --profile testnet -p polkadot-parachain-bin
@@ -139,7 +139,7 @@ echo "polkadot-parachain - found: $COLLATOR_BIN"
 SPEC_BUILDER_BIN="$POLKADOT_REPO/target/testnet/chain-spec-builder"
 if [[ -f "$SPEC_BUILDER_BIN" ]]; then
   SPEC_BUILDER_BIN="$(canonical_path "$SPEC_BUILDER_BIN")"
-elif ! SPEC_BUILDER_BIN="$(command -v chain-spec-builder 2>/dev/null)"; then
+else #elif ! SPEC_BUILDER_BIN="$(command -v chain-spec-builder 2>/dev/null)"; then
   echo "chain-spec-builder - not found; trying to build"
   cd "$POLKADOT_REPO"
   cargo build --profile testnet -p staging-chain-spec-builder --bin chain-spec-builder
@@ -217,11 +217,11 @@ else
 fi
 echo "parachain spec template - found: $PARA_SPEC_TMPL"
 
-mkdir xtsend.proj
+mkdir -p xtsend.proj
 XTSEND_BIN="xtsend.proj/target/release/xtsend"
 if [[ -f "$XTSEND_BIN" ]]; then
   XTSEND_BIN="$(canonical_path "$XTSEND_BIN")"
-elif ! XTSEND_BIN="$(command -v xtsend 2>/dev/null)"; then
+else #elif ! XTSEND_BIN="$(command -v xtsend 2>/dev/null)"; then
   echo "xtsend - not found; trying to build"
   mkdir -p xtsend.proj/src; cd xtsend.proj
   cat > Cargo.toml <<'EOF'
