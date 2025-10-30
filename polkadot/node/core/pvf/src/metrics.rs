@@ -90,10 +90,10 @@ impl Metrics {
 				metrics.preparation_max_rss.observe(max_rss as f64);
 			}
 
-			#[cfg(any(
-				all(target_os = "linux", not(feature = "x-shadow")),
-				feature = "jemalloc-allocator"
-			))]
+			#[cfg(all(
+				any(target_os = "linux",
+					feature = "jemalloc-allocator"
+				), not(feature = "x-shadow")))]
 			if let Some(tracker_stats) = memory_stats.memory_tracker_stats {
 				// We convert these stats from B to KB to match the unit of `ru_maxrss` from
 				// `getrusage`.
@@ -148,16 +148,16 @@ struct MetricsInner {
 	#[cfg(all(target_os = "linux", not(feature = "x-shadow")))]
 	preparation_max_rss: prometheus::Histogram,
 	// Max. allocated memory, tracked by Jemallocator, polling-based
-	#[cfg(any(
-		all(target_os = "linux", not(feature = "x-shadow")),
+	#[cfg(all(any(
+		target_os = "linux",
 		feature = "jemalloc-allocator"
-	))]
+	), not(feature = "x-shadow")))]
 	preparation_max_allocated: prometheus::Histogram,
 	// Max. resident memory, tracked by Jemallocator, polling-based
-	#[cfg(any(
-		all(target_os = "linux", not(feature = "x-shadow")),
+	#[cfg(all(any(
+		target_os = "linux",
 		feature = "jemalloc-allocator"
-	))]
+	), not(feature = "x-shadow")))]
 	preparation_max_resident: prometheus::Histogram,
 	// Peak allocation value, tracked by tracking-allocator
 	preparation_peak_tracked_allocation: prometheus::Histogram,
@@ -320,10 +320,10 @@ impl metrics::Metrics for Metrics {
 				)?,
 				registry,
 			)?,
-			#[cfg(any(
-				all(target_os = "linux", not(feature = "x-shadow")),
-				feature = "jemalloc-allocator"
-			))]
+			#[cfg(all(
+				any(target_os = "linux",
+					feature = "jemalloc-allocator"
+				), not(feature = "x-shadow")))]
 			preparation_max_resident: prometheus::register(
 				prometheus::Histogram::with_opts(
 					prometheus::HistogramOpts::new(
@@ -336,10 +336,10 @@ impl metrics::Metrics for Metrics {
 				)?,
 				registry,
 			)?,
-			#[cfg(any(
-				all(target_os = "linux", not(feature = "x-shadow")),
-				feature = "jemalloc-allocator"
-			))]
+			#[cfg(all(
+				any(target_os = "linux",
+					feature = "jemalloc-allocator"
+				), not(feature = "x-shadow")))]
 			preparation_max_allocated: prometheus::register(
 				prometheus::Histogram::with_opts(
 					prometheus::HistogramOpts::new(
