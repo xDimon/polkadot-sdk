@@ -113,10 +113,7 @@ else #elif ! POLKADOT_BIN="$(command -v polkadot 2>/dev/null)"; then
   echo "polkadot - not found; trying to build"
   cd "$POLKADOT_REPO"
   cargo build --profile testnet --features x-shadow -p polkadot
-  PATH_BAK=$PATH
-  PATH="$POLKADOT_REPO/target/testnet/:$PATH"
-  POLKADOT_BIN="$(command -v polkadot 2>/dev/null || true)"
-  PATH=$PATH_BAK
+  POLKADOT_BIN="$(canonical_path "$POLKADOT_BIN")"
   [ -n "$POLKADOT_BIN" ] || { echo "polkadot - is not built"; exit 1; }
   cd -
 fi
@@ -129,10 +126,7 @@ else #elif ! COLLATOR_BIN="$(command -v polkadot-parachain 2>/dev/null)"; then
   echo "polkadot-parachain - not found; trying to build"
   cd "$POLKADOT_REPO"
   cargo build --profile testnet --features x-shadow -p polkadot-parachain-bin
-  PATH_BAK=$PATH
-  PATH="$POLKADOT_REPO/target/testnet/:$PATH"
-  COLLATOR_BIN="$(command -v polkadot-parachain 2>/dev/null || true)"
-  PATH=$PATH_BAK
+  COLLATOR_BIN="$(canonical_path "$COLLATOR_BIN")"
   [ -n "$COLLATOR_BIN" ] || { echo "polkadot-parachain - is not built"; exit 1; }
   cd -
 fi
@@ -145,10 +139,7 @@ else #elif ! SPEC_BUILDER_BIN="$(command -v chain-spec-builder 2>/dev/null)"; th
   echo "chain-spec-builder - not found; trying to build"
   cd "$POLKADOT_REPO"
   cargo build --profile testnet -p staging-chain-spec-builder --bin chain-spec-builder
-  PATH_BAK=$PATH
-  PATH="$POLKADOT_REPO/target/testnet/:$PATH"
-  SPEC_BUILDER_BIN="$(command -v chain-spec-builder 2>/dev/null || true)"
-  PATH=$PATH_BAK
+  SPEC_BUILDER_BIN="$(canonical_path "$SPEC_BUILDER_BIN")"
   [ -n "$SPEC_BUILDER_BIN" ] || { echo "chain-spec-builder - is not built"; exit 1; }
   cd -
 fi
@@ -157,10 +148,7 @@ echo "chain-spec-builder - found: $SPEC_BUILDER_BIN"
 if ! SUBKEY_BIN="$(command -v subkey 2>/dev/null)"; then
   echo "subkey - not found; trying to install"
   cargo install subkey
-  PATH_BAK=$PATH
-  PATH="$HOME/.cargo/bin/:$PATH"
   SUBKEY_BIN="$(command -v subkey 2>/dev/null || true)"
-  PATH=$PATH_BAK
   [ -n "$SUBKEY_BIN" ] || { echo "subkey - is not installed"; exit 1; }
 fi
 echo "subkey - found: $SUBKEY_BIN"
@@ -168,10 +156,7 @@ echo "subkey - found: $SUBKEY_BIN"
 if ! SUBXT_BIN="$(command -v subxt 2>/dev/null)"; then
   echo "subxt - not found; trying to install"
   cargo install subxt-cli
-  PATH_BAK=$PATH
-  PATH="$HOME/.cargo/bin/:$PATH"
   SUBXT_BIN="$(command -v subxt 2>/dev/null || true)"  # FIX: correct var
-  PATH=$PATH_BAK
   [ -n "$SUBXT_BIN" ] || { echo "subxt - is not installed"; exit 1; }
 fi
 echo "subxt - found: $SUBXT_BIN"
