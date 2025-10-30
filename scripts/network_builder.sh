@@ -118,6 +118,7 @@ else #elif ! POLKADOT_BIN="$(command -v polkadot 2>/dev/null)"; then
   POLKADOT_BIN="$(command -v polkadot 2>/dev/null || true)"
   PATH=$PATH_BAK
   [ -n "$POLKADOT_BIN" ] || { echo "polkadot - is not built"; exit 1; }
+  cd -
 fi
 echo "polkadot - found: $POLKADOT_BIN"
 
@@ -133,6 +134,7 @@ else #elif ! COLLATOR_BIN="$(command -v polkadot-parachain 2>/dev/null)"; then
   COLLATOR_BIN="$(command -v polkadot-parachain 2>/dev/null || true)"
   PATH=$PATH_BAK
   [ -n "$COLLATOR_BIN" ] || { echo "polkadot-parachain - is not built"; exit 1; }
+  cd -
 fi
 echo "polkadot-parachain - found: $COLLATOR_BIN"
 
@@ -148,6 +150,7 @@ else #elif ! SPEC_BUILDER_BIN="$(command -v chain-spec-builder 2>/dev/null)"; th
   SPEC_BUILDER_BIN="$(command -v chain-spec-builder 2>/dev/null || true)"
   PATH=$PATH_BAK
   [ -n "$SPEC_BUILDER_BIN" ] || { echo "chain-spec-builder - is not built"; exit 1; }
+  cd -
 fi
 echo "chain-spec-builder - found: $SPEC_BUILDER_BIN"
 
@@ -182,6 +185,7 @@ else
   cargo build --release -p glutton-westend-runtime
   RUNTIME_WASM="$(canonical_path "target/release/wbuild/glutton-westend-runtime/glutton_westend_runtime.compact.compressed.wasm")"
   [ -f "$RUNTIME_WASM" ] || { echo "glutton_westend_runtime - is not built"; exit 1; }
+  cd -
 fi
 echo "glutton_westend_runtime - found: $RUNTIME_WASM"
 
