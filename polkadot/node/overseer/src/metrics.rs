@@ -270,7 +270,7 @@ impl MetricsTrait for Metrics {
 			#[cfg(all(
 				any(target_os = "linux",
 					feature = "jemalloc-allocator"
-				)), not(feature = "x-shadow"))]
+				), not(feature = "x-shadow")))]
 			memory_stats_allocated: prometheus::register(
 				prometheus::Gauge::<prometheus::U64>::new(
 					"polkadot_memory_allocated",
