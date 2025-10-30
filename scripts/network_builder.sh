@@ -128,7 +128,7 @@ if [[ -f "$COLLATOR_BIN" ]]; then
 else #elif ! COLLATOR_BIN="$(command -v polkadot-parachain 2>/dev/null)"; then
   echo "polkadot-parachain - not found; trying to build"
   cd "$POLKADOT_REPO"
-  cargo build --profile testnet -p polkadot-parachain-bin
+  cargo build --profile testnet --features x-shadow -p polkadot-parachain-bin
   PATH_BAK=$PATH
   PATH="$POLKADOT_REPO/target/testnet/:$PATH"
   COLLATOR_BIN="$(command -v polkadot-parachain 2>/dev/null || true)"
