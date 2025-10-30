@@ -51,12 +51,13 @@ pub struct PrepareStats {
 	pub observed_wasm_code_len: u32,
 }
 
+#[cfg(not(feature = "x-shadow"))]
+const _: () = { compile_error!(r#"Feature "x-shadow" must be enabled here"#); };
+
 /// Helper struct to contain all the memory stats, including `MemoryAllocationStats` and, if
 /// supported by the OS, `ru_maxrss`.
 #[derive(Clone, Debug, Default, Encode, Decode)]
 pub struct MemoryStats {
-	#[cfg(not(feature = "x-shadow"))]
-	__x_shadow_feature_is_required__: ::core::marker::PhantomData::<::__x_shadow__missing_feature__>,
 	/// Memory stats from `tikv_jemalloc_ctl`, polling-based and not very precise.
 	#[cfg(all(any(
 		target_os = "linux",
