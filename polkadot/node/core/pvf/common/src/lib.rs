@@ -87,8 +87,11 @@ pub fn framed_send_blocking(w: &mut (impl Write + Unpin), buf: &[u8]) -> io::Res
     })?;
 
 	let line = format!("{}[{}]: framed_send_blocking: after write len, before write payload\n", std::env::var("SHADOW_TAG").unwrap_or_else(|_| "***".to_string()), std::process::id());
+
 	let _ = unsafe { libc::write(file.as_raw_fd(), line.as_ptr() as *const libc::c_void, line.len()) };
 
+	#[cfg(not(feature = "x-shadow"))]
+	const _: () = { compile_error!(r#"Feature "x-shadow" must be enabled here"#); };
     #[cfg(not(feature = "x-shadow"))]
     w.write_all(buf).map_err(|err| {
         let line = format!("{}[{}]: framed_send_blocking: writing of payload failed: {}\n", std::env::var("SHADOW_TAG").unwrap_or_else(|_| "***".to_string()), std::process::id(), err.to_string());
@@ -96,6 +99,8 @@ pub fn framed_send_blocking(w: &mut (impl Write + Unpin), buf: &[u8]) -> io::Res
         err
     })?;
 
+	#[cfg(not(feature = "x-shadow"))]
+	const _: () = { compile_error!(r#"Feature "x-shadow" must be enabled here"#); };
 	#[cfg(feature = "x-shadow")]
 	{
 		// Under Shadow simulation, writes are performed in chunks because

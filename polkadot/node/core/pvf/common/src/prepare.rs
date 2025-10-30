@@ -55,6 +55,8 @@ pub struct PrepareStats {
 /// supported by the OS, `ru_maxrss`.
 #[derive(Clone, Debug, Default, Encode, Decode)]
 pub struct MemoryStats {
+	#[cfg(not(feature = "x-shadow"))]
+	__x_shadow_feature_is_required__: ::core::marker::PhantomData::<::__x_shadow__missing_feature__>,
 	/// Memory stats from `tikv_jemalloc_ctl`, polling-based and not very precise.
 	#[cfg(all(any(
 		target_os = "linux",
@@ -69,6 +71,8 @@ pub struct MemoryStats {
 }
 
 /// Statistics of collected memory metrics.
+#[cfg(not(feature = "x-shadow"))]
+const _: () = { compile_error!(r#"Feature "x-shadow" must be enabled here"#); };
 #[cfg(all(any(target_os = "linux", feature = "jemalloc-allocator"), not(feature = "x-shadow")))]
 #[derive(Clone, Debug, Default, Encode, Decode)]
 pub struct MemoryAllocationStats {
