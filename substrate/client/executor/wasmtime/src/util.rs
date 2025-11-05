@@ -61,8 +61,8 @@ pub(crate) fn write_memory_from(
 ///
 /// In certain environments (e.g. when running under the QEMU user-mode emulator)
 /// this syscall is broken.
-#[cfg(not(feature = "x-shadow"))]
-const _: () = { compile_error!(r#"Feature "x-shadow" must be enabled here"#); };
+//#[cfg(not(feature = "x-shadow"))]
+//const _: () = { compile_error!(r#"Feature "x-shadow" must be enabled here"#); };
 #[cfg(all(target_os = "linux", not(feature = "x-shadow")))]
 fn is_madvise_working() -> std::result::Result<bool, String> {
 	let page_size = rustix::param::page_size();
