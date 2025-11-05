@@ -111,7 +111,7 @@ x-shadow = [
 	"polkadot-node-core-pvf-prepare-worker/x-shadow",
 	"polkadot-node-core-pvf-execute-worker/x-shadow",
 	"polkadot-node-core-pvf/x-shadow",
-	"polkadot-cli/x-shadow"
+	"polkadot-cli/x-shadow",
 ]
 
 # Generate the metadata hash needed for CheckMetadataHash

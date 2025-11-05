@@ -894,7 +894,7 @@ k256 = { version = "0.13.4", default-features = false }
 kitchensink-runtime = { path = "substrate/bin/node/runtime" }
 kvdb = { version = "0.13.0" }
 kvdb-memorydb = { version = "0.13.0" }
-kvdb-rocksdb = { version = "0.20.0" }
+kvdb-rocksdb = { version = "0.20", default-features = false }
 kvdb-shared-tests = { version = "0.11.0" }
 landlock = { version = "0.3.0" }
 libc = { version = "0.2.155" }
@@ -1578,3 +1578,5 @@ zeroize = { opt-level = 3 }
 
 [patch.crates-io]
 litep2p = { git = "https://github.com/xDimon/litep2p.git", rev = "e44ab69084ff04f15a34b73866dbeeeac9ff06ec" }
+kvdb-rocksdb = { git = "https://github.com/xDimon/parity-common", branch = "master" }
+kvdb = { git = "https://github.com/xDimon/parity-common", branch = "master" }

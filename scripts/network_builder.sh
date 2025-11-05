@@ -72,7 +72,7 @@ dbg "WORKDIR $WORKDIR created"
 # =====================
 # Repos / constants
 # =====================
-POLKADOT_REPO="${POLKADOT_REPO:-$HOME/Projects/polkadot}"
+POLKADOT_REPO="${POLKADOT_REPO:-$HOME/dev/polkadot-sdk}"
 RELAYCHAIN="${RELAYCHAIN:-westend-local}"
 PARA_BASE=${PARA_BASE:-2000}
 
@@ -80,10 +80,24 @@ PARA_BASE=${PARA_BASE:-2000}
 HOST_BW_UP="${HOST_BW_UP:-50 Mbit}"
 HOST_BW_DOWN="${HOST_BW_DOWN:-50 Mbit}"
 
-# --- pov bloater
-XTSEND_PAYLOAD_BYTES="${XTSEND_PAYLOAD_BYTES:-1000000}" # 1Mb
-XTSEND_INTERVAL_SEC="${XTSEND_INTERVAL_SEC:-1}"
-XTSEND_START_DELAY_SEC="${XTSEND_START_DELAY_SEC:-30}"
+
+# --- glutton PoV sizing (runtime config)
+# For pallet-glutton genesis, the keys expected in JSON are raw u64 integers representing FixedU64 inner values:
+#   - storage: u64 representing FixedU64 (e.g., 1_000_000_000 = 1.0, 2_500_000_000 = 2.5)
+#   - compute: u64 representing FixedU64 (e.g., 50_000_000 = 0.05, 500_000_000 = 0.5)
+#   - blockLength: u64 representing FixedU64 (default 0 = no block body bloat)
+#   - trashDataCount: u32 number of 1KiB entries pre-populated for PoV proofs (e.g. 5120 ~= 5MiB of keys).
+# FixedU64 inner representation: 1.0 = 1_000_000_000 (1 billion), 0.5 = 500_000_000, etc.
+# For maximum PoV: storage=2_500_000_000 (2.5 = 250%), compute=50_000_000 (0.05 = 5%)
+GLUTTON_STORAGE="${GLUTTON_STORAGE:-2500000000}"
+GLUTTON_COMPUTE="${GLUTTON_COMPUTE:-50000000}"
+GLUTTON_BLOCK_LENGTH="${GLUTTON_BLOCK_LENGTH:-0}"
+GLUTTON_TRASH_DATA_COUNT="${GLUTTON_TRASH_DATA_COUNT:-5120}"
+# Validate formats: integers only
+case "$GLUTTON_STORAGE" in (*[!0-9]*|"") echo "WARN: GLUTTON_STORAGE must be an integer; defaulting to 2'500'000'000" >&2; GLUTTON_STORAGE="2500000000";; esac
+case "$GLUTTON_COMPUTE" in (*[!0-9]*|"") echo "WARN: GLUTTON_COMPUTE must be an integer; defaulting to 50'000'000" >&2; GLUTTON_COMPUTE="50000000";; esac
+case "$GLUTTON_BLOCK_LENGTH" in (*[!0-9]*|"") echo "WARN: GLUTTON_BLOCK_LENGTH must be an integer; defaulting to 0" >&2; GLUTTON_BLOCK_LENGTH="0";; esac
+case "$GLUTTON_TRASH_DATA_COUNT" in (*[!0-9]*|"") echo "WARN: GLUTTON_TRASH_DATA_COUNT must be an integer; defaulting to 5'120" >&2; GLUTTON_TRASH_DATA_COUNT=5120;; esac
 
 LOGCFG="${LOGCFG:-info}"
 
@@ -206,98 +220,6 @@ else
 fi
 echo "parachain spec template - found: $PARA_SPEC_TMPL"
 
-mkdir -p xtsend.proj
-XTSEND_BIN="xtsend.proj/target/release/xtsend"
-if [[ -f "$XTSEND_BIN" ]]; then
-  XTSEND_BIN="$(canonical_path "$XTSEND_BIN")"
-else #elif ! XTSEND_BIN="$(command -v xtsend 2>/dev/null)"; then
-  echo "xtsend - not found; trying to build"
-  mkdir -p xtsend.proj/src; cd xtsend.proj
-  cat > Cargo.toml <<'EOF'
-[package]
-name = "xtsend"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-anyhow = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-subxt = "0.44"
-subxt-signer = "0.44"
-rand = "0.8"
-EOF
-
-  cat > src/main.rs <<'EOF'
-use anyhow::Result;
-use std::env;
-use std::str::FromStr;
-use rand::{rngs::OsRng, RngCore};
-use subxt::{config::polkadot::PolkadotConfig, OnlineClient};
-use subxt_signer::{sr25519, SecretUri};
-use subxt::tx::TxStatus;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Args: <ws_url> <suri> <size_bytes>
-    let ws_url = env::args().nth(1).expect("ws url");
-    let suri   = env::args().nth(2).expect("suri");
-    let size   = env::args().nth(3).expect("size in bytes");
-
-    // 1) parse size and generate random payload of that length
-    //    Use OS CSPRNG for high-quality randomness.
-    let n: usize = size.parse()
-        .expect("size must be a non-negative integer");
-    let mut payload = vec![0u8; n];
-    OsRng.fill_bytes(&mut payload);
-
-    // 2) connect and prepare signer
-    let api    = OnlineClient::<PolkadotConfig>::from_url(&ws_url).await?;
-    let secret = SecretUri::from_str(&suri)?;
-    let signer = sr25519::Keypair::from_uri(&secret)?;
-
-    // 3) dynamic call: System.remark(Bytes)
-    let value = subxt::dynamic::Value::from_bytes(&payload);
-    let call  = subxt::dynamic::tx("System", "remark",
-        vec![("remark", value)]
-    ).unvalidated();
-
-    // 4) sign, submit, and watch statuses
-    let mut progress = api
-        .tx()
-        .sign_and_submit_then_watch_default(&call, &signer)
-        .await?;
-
-    while let Some(status) = progress.next().await {
-        match status? {
-            TxStatus::Validated => println!("[ ] Validated"),
-            TxStatus::Broadcasted => println!("[>] Broadcasted"),
-            TxStatus::NoLongerInBestBlock => println!("[ ] NoLongerInBestBlock"),
-            TxStatus::InBestBlock(info) => {
-                let hash = info.block_hash();
-                let block = api.blocks().at(hash).await?;
-                println!("[*] InBestBlock    #{} {}", block.number(), hash);
-            }
-            TxStatus::InFinalizedBlock(info) => {
-                let hash = info.block_hash();
-                let block = api.blocks().at(hash).await?;
-                println!("[✓] FinalizedBlock #{} {}", block.number(), hash);
-                break;
-            }
-            TxStatus::Error { message } => { println!("[x] Error: {message}"); break; }
-            TxStatus::Invalid { message } => { println!("[x] Invalid: {message}"); break; }
-            TxStatus::Dropped { message } => { println!("[x] Dropped: {message}"); break; }
-        }
-    }
-    Ok(())
-}
-EOF
-
-  cargo build --release
-  XTSEND_BIN="$(canonical_path target/release/xtsend)"
-  [ -f "$XTSEND_BIN" ] || { echo "xtsend - is not built"; exit 1; }
-  cd - >/dev/null
-fi
-echo "xtsend - found: $XTSEND_BIN"
 
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -326,7 +248,6 @@ clean() {
     "$WORKDIR/relaychain-val-paras-no-code.json"
     "$WORKDIR/parachain.json"
     "$WORKDIR/parachain-no-code.json"
-    "$WORKDIR/parachain-"[0-9]*".json"
     "$WORKDIR/parachain-"[0-9]*"-no-code.json"
     "$WORKDIR/para-"[0-9]*"-genesis"
     "$WORKDIR/para-"[0-9]*"-wasm"
@@ -1335,18 +1256,6 @@ generate_shadow_config() {
         printf '          RUST_LOG: "%s"\n' "$LOGCFG"
         printf '          SHADOW_TAG: "%s"\n' "$host"
         printf '        expected_final_state: running\n'
-        printf '      - path: %s\n' "/bin/bash"
-        printf '        args: [\n'
-        printf '          "-lc",\n'
-        printf '          "sleep %s; while true; do %s ws://127.0.0.1:%s/ //%s %s; sleep %s; done"\n' \
-               "$XTSEND_START_DELAY_SEC" \
-               "$XTSEND_BIN" \
-               "$rpc_port" \
-               "$name" \
-               "$XTSEND_PAYLOAD_BYTES" \
-               "$XTSEND_INTERVAL_SEC"
-        printf '        ]\n'
-        printf '        expected_final_state: running\n'
       } >>"$out"
       ip_octet=$((ip_octet+1)); net_id=$((net_id+1))
     done
@@ -1384,12 +1293,42 @@ for ((p=0; p<PARACHAINS; p++)); do
   cp "$PARA_SPEC_TMPL" "$WORKDIR/parachain-$id.json"
   clean_dev_collators_patch "$WORKDIR/parachain-$id.json" "$id"
   for ((c=0; c<COLLATORS; c++)); do add_dev_collators_patch "$WORKDIR/parachain-$id.json" "Collator_$((PARA_BASE+p))_$((c+1))"; done
-  "$COLLATOR_BIN" export-genesis-state --chain "$WORKDIR/parachain-$id.json" "$gfile" >/dev/null 2>/dev/null
-  "$COLLATOR_BIN" export-genesis-wasm  --chain "$WORKDIR/parachain-$id.json" "$wfile" >/dev/null 2>/dev/null
+  # Apply glutton PoV parameters (storage, compute, blockLength, trashDataCount)
+  # FixedU64 values (storage, compute, blockLength) must be strings
+  # u32 value (trashDataCount) must be integer
+  tmp_parachain="$(mktemp_wrk tmp.glutton.XXXXXX)"
+  jq \
+    --arg storage "$GLUTTON_STORAGE" \
+    --arg compute "$GLUTTON_COMPUTE" \
+    --arg block_length "$GLUTTON_BLOCK_LENGTH" \
+    --argjson trash "$GLUTTON_TRASH_DATA_COUNT" '
+    .genesis //= {} |
+    .genesis.runtimeGenesis //= {} |
+    .genesis.runtimeGenesis.patch //= {} |
+    .genesis.runtimeGenesis.patch.glutton //= {} |
+    # set camelCase fields: FixedU64 as strings, u32 as integer
+    .genesis.runtimeGenesis.patch.glutton.storage = $storage |
+    .genesis.runtimeGenesis.patch.glutton.compute = $compute |
+    .genesis.runtimeGenesis.patch.glutton.blockLength = $block_length |
+    .genesis.runtimeGenesis.patch.glutton.trashDataCount = $trash |
+    # drop any snake_case duplicates that may exist in templates
+    .genesis.runtimeGenesis.patch.glutton |= (del(.block_length) | del(.trash_data_count))
+  ' "$WORKDIR/parachain-$id.json" > "$tmp_parachain" && mv -- "$tmp_parachain" "$WORKDIR/parachain-$id.json"
+
+  dbg "Exporting parachain $id genesis state..."
+  "$COLLATOR_BIN" export-genesis-state --chain "$WORKDIR/parachain-$id.json" "$gfile"
+  dbg "Exporting parachain $id genesis wasm..."
+  "$COLLATOR_BIN" export-genesis-wasm  --chain "$WORKDIR/parachain-$id.json" "$wfile"
+
   tmp_paras="$(mktemp_wrk tmp.paras.XXXXXX)"
   jq --rawfile gh "$gfile" --rawfile vc "$wfile" --argjson id "$id" '. + [[ $id, [ ($gh|gsub("[\r\n]";"")), ($vc|gsub("[\r\n]";"")), true ] ]]' "$paras_file" > "$tmp_paras" && mv -- "$tmp_paras" "$paras_file"
-  "$COLLATOR_BIN" build-spec --chain "$WORKDIR/parachain-$id.json" --disable-default-bootnode --raw > "$WORKDIR/parachain-$id-raw.json" 2>/dev/null
+
+  dbg "Building raw parachain $id spec..."
+  "$COLLATOR_BIN" build-spec --chain "$WORKDIR/parachain-$id.json" --disable-default-bootnode --raw > "$WORKDIR/parachain-$id-raw.json"
   replace_runtime_code "$WORKDIR/parachain-$id.json" "$WORKDIR/parachain-$id-no-code.json"
+  # Keep parachain-$id.json for debugging (comment out the line below in clean() that removes it)
+  dbg "DEBUG: Glutton config in parachain-$id.json:" >&2
+  jq '.genesis.runtimeGenesis.patch.glutton' "$WORKDIR/parachain-$id.json" >&2 || echo "No glutton config found" >&2
 done
 
 patch_relay_with_paras "$WORKDIR/relaychain-val.json" "$paras_file" "$WORKDIR/relaychain-val-paras.json"
@@ -1404,3 +1343,4 @@ done
 clean
 print_run_commands
 generate_shadow_config
+echo "Done. Raw specs, node manifests, and Shadow config are under: $WORKDIR"
