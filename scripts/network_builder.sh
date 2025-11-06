@@ -80,6 +80,11 @@ PARA_BASE=${PARA_BASE:-2000}
 HOST_BW_UP="${HOST_BW_UP:-50 Mbit}"
 HOST_BW_DOWN="${HOST_BW_DOWN:-50 Mbit}"
 
+# --- collatorSelection defaults (можно переопределить окружением)
+COLLATOR_SELECTION_BOND="${COLLATOR_SELECTION_BOND:-0}"
+# Если задать COLLATOR_SELECTION_DESIRED, будет использоваться оно,
+# иначе desiredCandidates = числу invulnerables.
+: "${COLLATOR_SELECTION_DESIRED:=}"
 
 # --- glutton PoV sizing (runtime config)
 # For pallet-glutton genesis, the keys expected in JSON are raw u64 integers representing FixedU64 inner values:
@@ -219,7 +224,6 @@ else
   [ -f "$PARA_SPEC_TMPL" ] || { echo "parachain spec template - is not built"; exit 1; }
 fi
 echo "parachain spec template - found: $PARA_SPEC_TMPL"
-
 
 lc() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -450,9 +454,10 @@ clean_dev_collators_patch() {
     echo "clean_dev_collators_patch: Spec file not found: $spec_path" >&2; return 1; fi
   if ! printf '%s' "$para_id" | grep -Eq '^[0-9]+$'; then
     echo "clean_dev_collators_patch: PARA_ID must be an integer" >&2; return 1; fi
+
   local tmp_out
   tmp_out="$(mktemp "$WORKDIR/tmp.cleanpara.XXXXXX")"
-  jq --argjson pid "$para_id" '
+  jq --argjson pid "$para_id" --arg bond_str "$COLLATOR_SELECTION_BOND" '
     .id = ("para" + ($pid|tostring)) |
     .name = ("Parachain_" + ($pid|tostring)) |
     .para_id = $pid |
@@ -489,6 +494,14 @@ clean_dev_collators_patch() {
         .genesis.runtimeGenesis.config.parachainInfo.parachainId = $pid
       else . end
     ) |
+    # --- collatorSelection: ensure exists & cleared (CONFIG) ---
+    .genesis.runtimeGenesis.config = (.genesis.runtimeGenesis.config // {}) |
+    .genesis.runtimeGenesis.config.collatorSelection = {
+      invulnerables: [],
+      candidacyBond: $bond_str,
+      desiredCandidates: 0
+    } |
+    # --- also clear PATCH branches if present ---
     (
       if ((.genesis? // null) != null
           and (.genesis.runtimeGenesis? // null) != null
@@ -502,11 +515,11 @@ clean_dev_collators_patch() {
     (
       if ((.genesis? // null) != null
           and (.genesis.runtimeGenesis? // null) != null
-          and (.genesis.runtimeGenesis.patch? // null) != null
-          and (.genesis.runtimeGenesis.patch.aura? // null) != null
-          and (.genesis.runtimeGenesis.patch.aura | has("authorities")))
+          and (.genesis.runtimeGenesis.config? // null) != null
+          and (.genesis.runtimeGenesis.config.aura? // null) != null
+          and (.genesis.runtimeGenesis.config.aura | has("authorities")))
       then
-        .genesis.runtimeGenesis.patch.aura.authorities = []
+        .genesis.runtimeGenesis.config.aura.authorities = []
       else . end
     ) |
     (
@@ -527,16 +540,6 @@ clean_dev_collators_patch() {
           and (.genesis.runtimeGenesis.config.balances | has("balances")))
       then
         .genesis.runtimeGenesis.config.balances.balances = []
-      else . end
-    ) |
-    (
-      if ((.genesis? // null) != null
-          and (.genesis.runtimeGenesis? // null) != null
-          and (.genesis.runtimeGenesis.config? // null) != null
-          and (.genesis.runtimeGenesis.config.aura? // null) != null
-          and (.genesis.runtimeGenesis.config.aura | has("authorities")))
-      then
-        .genesis.runtimeGenesis.config.aura.authorities = []
       else . end
     ) |
     (
@@ -567,134 +570,134 @@ clean_dev_collators_patch() {
 # add_dev_validators_patch <SPEC_JSON> <VALIDATOR_NAME>
 # Adds or updates a validator's session keys, balances, and bootNodes in the patch section.
 add_dev_validators_patch() {
-    local spec_path="$1"
-    local validator_name="$2"
-    if [ -z "$spec_path" ] || [ ! -f "$spec_path" ]; then
-        echo "add_dev_validators_patch: Spec file not found: $spec_path" >&2
-        return 1
-    fi
-    if [ -z "$validator_name" ]; then
-        echo "add_dev_validators_patch: Validator name required" >&2
-        return 1
-    fi
-    local lower
-    lower="$(lc "$validator_name")"
-    local manifest="$WORKDIR/nodes/$lower/manifest.json"
-    if [ ! -f "$manifest" ]; then
-        echo "add_dev_validators_patch: Manifest not found for validator $validator_name at $manifest" >&2
-        return 1
-    fi
+  local spec_path="$1"
+  local validator_name="$2"
+  if [ -z "$spec_path" ] || [ ! -f "$spec_path" ]; then
+      echo "add_dev_validators_patch: Spec file not found: $spec_path" >&2
+      return 1
+  fi
+  if [ -z "$validator_name" ]; then
+      echo "add_dev_validators_patch: Validator name required" >&2
+      return 1
+  fi
+  local lower
+  lower="$(lc "$validator_name")"
+  local manifest="$WORKDIR/nodes/$lower/manifest.json"
+  if [ ! -f "$manifest" ]; then
+      echo "add_dev_validators_patch: Manifest not found for validator $validator_name at $manifest" >&2
+      return 1
+  fi
     # Read controller, grandpa, beefy addresses
-    local controller_ss58 grandpa_ss58 beefy_ss58 stash_ss58
-    controller_ss58="$(jq -r '.controller.ss58' "$manifest")"
-    stash_ss58="$(jq -r '.stash.ss58' "$manifest")"
-    grandpa_ss58="$(jq -r '.session_keys[]|select(.type=="gran")|.ss58' "$manifest")"
-    beefy_ss58="$(jq -r '.session_keys[]|select(.type=="beef")|.ss58' "$manifest")"
-    if [ -z "$controller_ss58" ] || [ -z "$grandpa_ss58" ] || [ -z "$beefy_ss58" ] || [ -z "$stash_ss58" ]; then
-        echo "add_dev_validators_patch: Missing key data in manifest for $validator_name" >&2
-        return 1
-    fi
+  local controller_ss58 grandpa_ss58 beefy_ss58 stash_ss58
+  controller_ss58="$(jq -r '.controller.ss58' "$manifest")"
+  stash_ss58="$(jq -r '.stash.ss58' "$manifest")"
+  grandpa_ss58="$(jq -r '.session_keys[]|select(.type=="gran")|.ss58' "$manifest")"
+  beefy_ss58="$(jq -r '.session_keys[]|select(.type=="beef")|.ss58' "$manifest")"
+  if [ -z "$controller_ss58" ] || [ -z "$grandpa_ss58" ] || [ -z "$beefy_ss58" ] || [ -z "$stash_ss58" ]; then
+      echo "add_dev_validators_patch: Missing key data in manifest for $validator_name" >&2
+      return 1
+  fi
     # Check if this is the first validator being added (before modifying session keys)
-    local is_first
-    is_first="$(jq -r '((.genesis.runtimeGenesis.patch.session.keys // []) | length) == 0' "$spec_path")"
+  local is_first
+  is_first="$(jq -r '((.genesis.runtimeGenesis.patch.session.keys // []) | length) == 0' "$spec_path")"
     # Build session key entry
-    local session_entry
-    session_entry="$(jq -cn \
-        --arg controller "$controller_ss58" \
-        --arg grandpa "$grandpa_ss58" \
-        --arg beefy "$beefy_ss58" \
-        '[ $controller, $controller, {
-            authority_discovery: $controller,
-            babe: $controller,
-            beefy: $beefy,
-            grandpa: $grandpa,
-            para_assignment: $controller,
-            para_validator: $controller
-        } ]')"
+  local session_entry
+  session_entry="$(jq -cn \
+      --arg controller "$controller_ss58" \
+      --arg grandpa "$grandpa_ss58" \
+      --arg beefy "$beefy_ss58" \
+      '[ $controller, $controller, {
+          authority_discovery: $controller,
+          babe: $controller,
+          beefy: $beefy,
+          grandpa: $grandpa,
+          para_assignment: $controller,
+          para_validator: $controller
+      } ]')"
     # Remove any existing entry with same controller, append new one
-    local tmp_out
-    tmp_out="$(mktemp "$WORKDIR/tmp.addval.XXXXXX")"
-    jq --argjson new_entry "$session_entry" --arg controller "$controller_ss58" '
-        .genesis = (.genesis // {}) |
-        .genesis.runtimeGenesis = (.genesis.runtimeGenesis // {}) |
-        .genesis.runtimeGenesis.patch = (.genesis.runtimeGenesis.patch // {}) |
-        .genesis.runtimeGenesis.patch.session = (.genesis.runtimeGenesis.patch.session // {}) |
-        .genesis.runtimeGenesis.patch.session.keys = (
-          (.genesis.runtimeGenesis.patch.session.keys // [])
-          | map(select(.[0] != $controller))
-          + [$new_entry]
-        )
-    ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
-    # If this is the first added validator, set Sudo key to its controller address
-    if [ "$is_first" = "true" ]; then
-      tmp_out="$(mktemp "$WORKDIR/tmp.addval.XXXXXX")"
-      jq --arg controller "$controller_ss58" '
-        .genesis = (.genesis // {}) |
-        .genesis.runtimeGenesis = (.genesis.runtimeGenesis // {}) |
-        .genesis.runtimeGenesis.patch = (.genesis.runtimeGenesis.patch // {}) |
-        .genesis.runtimeGenesis.patch.sudo = (
-          (.genesis.runtimeGenesis.patch.sudo // {})
-        ) |
-        .genesis.runtimeGenesis.patch.sudo.key = $controller
-      ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
-      echo "Sudo key set to controller of $validator_name"
-    fi
-    # Add/update balances for controller and stash
-    local amount_controller_default="1000000000000000000"
-    local amount_stash_default="1000000000000000000"
-    tmp_out="$(mktemp "$WORKDIR/tmp.addval.XXXXXX")"
-    jq --arg controller "$controller_ss58" --arg stash "$stash_ss58" \
-       --argjson amt_controller "$amount_controller_default" \
-       --argjson amt_stash "$amount_stash_default" '
+  local tmp_out
+  tmp_out="$(mktemp "$WORKDIR/tmp.addval.XXXXXX")"
+  jq --argjson new_entry "$session_entry" --arg controller "$controller_ss58" '
       .genesis = (.genesis // {}) |
       .genesis.runtimeGenesis = (.genesis.runtimeGenesis // {}) |
       .genesis.runtimeGenesis.patch = (.genesis.runtimeGenesis.patch // {}) |
-      .genesis.runtimeGenesis.patch.balances = (.genesis.runtimeGenesis.patch.balances // {}) |
-      .genesis.runtimeGenesis.patch.balances.balances = (
-        (.genesis.runtimeGenesis.patch.balances.balances // [])
-        | map(select(.[0] != $controller and .[0] != $stash))
-        + [[$controller, $amt_controller], [$stash, $amt_stash]]
+      .genesis.runtimeGenesis.patch.session = (.genesis.runtimeGenesis.patch.session // {}) |
+      .genesis.runtimeGenesis.patch.session.keys = (
+        (.genesis.runtimeGenesis.patch.session.keys // [])
+        | map(select(.[0] != $controller))
+        + [$new_entry]
       )
+  ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+    # If this is the first added validator, set Sudo key to its controller address
+  if [ "$is_first" = "true" ]; then
+    tmp_out="$(mktemp "$WORKDIR/tmp.addval.XXXXXX")"
+    jq --arg controller "$controller_ss58" '
+      .genesis = (.genesis // {}) |
+      .genesis.runtimeGenesis = (.genesis.runtimeGenesis // {}) |
+      .genesis.runtimeGenesis.patch = (.genesis.runtimeGenesis.patch // {}) |
+      .genesis.runtimeGenesis.patch.sudo = (
+        (.genesis.runtimeGenesis.patch.sudo // {})
+      ) |
+      .genesis.runtimeGenesis.patch.sudo.key = $controller
     ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+    echo "Sudo key set to controller of $validator_name"
+  fi
+    # Add/update balances for controller and stash
+  local amount_controller_default="1000000000000000000"
+  local amount_stash_default="1000000000000000000"
+  tmp_out="$(mktemp "$WORKDIR/tmp.addval.XXXXXX")"
+  jq --arg controller "$controller_ss58" --arg stash "$stash_ss58" \
+     --argjson amt_controller "$amount_controller_default" \
+     --argjson amt_stash "$amount_stash_default" '
+    .genesis = (.genesis // {}) |
+    .genesis.runtimeGenesis = (.genesis.runtimeGenesis // {}) |
+    .genesis.runtimeGenesis.patch = (.genesis.runtimeGenesis.patch // {}) |
+    .genesis.runtimeGenesis.patch.balances = (.genesis.runtimeGenesis.patch.balances // {}) |
+    .genesis.runtimeGenesis.patch.balances.balances = (
+      (.genesis.runtimeGenesis.patch.balances.balances // [])
+      | map(select(.[0] != $controller and .[0] != $stash))
+      + [[$controller, $amt_controller], [$stash, $amt_stash]]
+    )
+  ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
 
     # Add/update staking for the validator (controller acts as both stash and controller)
-    local amount_bonded_default="100000000000000"
-    tmp_out="$(mktemp "$WORKDIR/tmp.addval.XXXXXX")"
-    jq --arg controller "$controller_ss58" \
-       --argjson amt_bonded "$amount_bonded_default" '
-      (
-        if ((.genesis? // null) != null
-            and (.genesis.runtimeGenesis? // null) != null
-            and (.genesis.runtimeGenesis.patch? // null) != null
-            and (.genesis.runtimeGenesis.patch | has("staking")))
-        then
-          .genesis.runtimeGenesis.patch.staking = (
-            .genesis.runtimeGenesis.patch.staking
-            | .forceEra = "NotForcing"
-            | .minimumValidatorCount = (.minimumValidatorCount // 1)
-            | .slashRewardFraction = (.slashRewardFraction // 100000000)
-            | .invulnerables = (((.invulnerables // []) + [$controller]) | unique)
-            | .stakers = ((.stakers // [])
-                | map(select(.[0] != $controller))
-                + [[ $controller, $controller, $amt_bonded, "Validator" ]])
-            | .validatorCount = ((.invulnerables // []) | length)
-          )
-        else . end
-      )
-    ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+  local amount_bonded_default="100000000000000"
+  tmp_out="$(mktemp "$WORKDIR/tmp.addval.XXXXXX")"
+  jq --arg controller "$controller_ss58" \
+     --argjson amt_bonded "$amount_bonded_default" '
+    (
+      if ((.genesis? // null) != null
+          and (.genesis.runtimeGenesis? // null) != null
+          and (.genesis.runtimeGenesis.patch? // null) != null
+          and (.genesis.runtimeGenesis.patch | has("staking")))
+      then
+        .genesis.runtimeGenesis.patch.staking = (
+          .genesis.runtimeGenesis.patch.staking
+          | .forceEra = "NotForcing"
+          | .minimumValidatorCount = (.minimumValidatorCount // 1)
+          | .slashRewardFraction = (.slashRewardFraction // 100000000)
+          | .invulnerables = (((.invulnerables // []) + [$controller]) | unique)
+          | .stakers = ((.stakers // [])
+              | map(select(.[0] != $controller))
+              + [[ $controller, $controller, $amt_bonded, "Validator" ]])
+          | .validatorCount = ((.invulnerables // []) | length)
+        )
+      else . end
+    )
+  ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
 
     # Append bootNode
-    local listen_address peer_id bootnode
-    listen_address="$(jq -r '.listen_address' "$manifest")"
-    peer_id="$(jq -r '.peer_id' "$manifest")"
-    if [ -n "$listen_address" ] && [ -n "$peer_id" ]; then
-        bootnode="${listen_address}/p2p/${peer_id}"
-        tmp_out="$(mktemp "$WORKDIR/tmp.addval.XXXXXX")"
-        jq --arg bootnode "$bootnode" '
-          .bootNodes = ((.bootNodes // []) + [$bootnode] | unique)
-        ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
-    fi
-    echo "Validator $validator_name added or updated in $spec_path"
+  local listen_address peer_id bootnode
+  listen_address="$(jq -r '.listen_address' "$manifest")"
+  peer_id="$(jq -r '.peer_id' "$manifest")"
+  if [ -n "$listen_address" ] && [ -n "$peer_id" ]; then
+      bootnode="${listen_address}/p2p/${peer_id}"
+      tmp_out="$(mktemp "$WORKDIR/tmp.addval.XXXXXX")"
+      jq --arg bootnode "$bootnode" '
+        .bootNodes = ((.bootNodes // []) + [$bootnode] | unique)
+      ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+  fi
+  echo "Validator $validator_name added or updated in $spec_path"
 }
 
 # add_dev_collators_patch <SPEC_JSON> <COLLATOR_NAME>
@@ -802,7 +805,30 @@ add_dev_collators_patch() {
     )
   ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
 
-  # Fund collator controller in balances
+  # --- NEW: ensure CONFIG.collatorSelection exists, add acc, set bond & desired
+  tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
+  jq --arg acc "$controller_ss58" \
+     --arg bond_str "$COLLATOR_SELECTION_BOND" '
+    .genesis = (.genesis // {}) |
+    .genesis.runtimeGenesis = (.genesis.runtimeGenesis // {}) |
+    .genesis.runtimeGenesis.config = (.genesis.runtimeGenesis.config // {}) |
+    .genesis.runtimeGenesis.config.collatorSelection
+      = (.genesis.runtimeGenesis.config.collatorSelection // {}) |
+    .genesis.runtimeGenesis.config.collatorSelection.invulnerables
+      = (
+        ((.genesis.runtimeGenesis.config.collatorSelection.invulnerables // [])
+          + [$acc]) | unique
+      ) |
+    .genesis.runtimeGenesis.config.collatorSelection
+      |= (
+        .candidacyBond = $bond_str
+        | .desiredCandidates =
+            ( ( (env.COLLATOR_SELECTION_DESIRED // "") | tonumber? )
+              // ((.invulnerables // []) | length) )
+      )
+  ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+
+  # Fund collator controller in balances (patch + config sync)
   local amount_collator_default="1000000000000000000"
   tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
   jq --arg controller "$controller_ss58" \
@@ -1306,12 +1332,10 @@ for ((p=0; p<PARACHAINS; p++)); do
     .genesis.runtimeGenesis //= {} |
     .genesis.runtimeGenesis.patch //= {} |
     .genesis.runtimeGenesis.patch.glutton //= {} |
-    # set camelCase fields: FixedU64 as strings, u32 as integer
     .genesis.runtimeGenesis.patch.glutton.storage = $storage |
     .genesis.runtimeGenesis.patch.glutton.compute = $compute |
     .genesis.runtimeGenesis.patch.glutton.blockLength = $block_length |
     .genesis.runtimeGenesis.patch.glutton.trashDataCount = $trash |
-    # drop any snake_case duplicates that may exist in templates
     .genesis.runtimeGenesis.patch.glutton |= (del(.block_length) | del(.trash_data_count))
   ' "$WORKDIR/parachain-$id.json" > "$tmp_parachain" && mv -- "$tmp_parachain" "$WORKDIR/parachain-$id.json"
 
@@ -1340,7 +1364,7 @@ for ((p=0; p<PARACHAINS; p++)); do
   for ((c=0; c<COLLATORS; c++)); do id=$((PARA_BASE+p)); provision_node_keys "Collator_$((PARA_BASE+p))_$((c+1))" "$WORKDIR/parachain-$id-raw.json"; done
 done
 
-clean
+#clean
 print_run_commands
 generate_shadow_config
 echo "Done. Raw specs, node manifests, and Shadow config are under: $WORKDIR"
