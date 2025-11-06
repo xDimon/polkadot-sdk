@@ -464,6 +464,8 @@ clean_dev_collators_patch() {
     .genesis = (.genesis // {}) |
     .genesis.runtimeGenesis = (.genesis.runtimeGenesis // {}) |
     .genesis.runtimeGenesis.patch = (.genesis.runtimeGenesis.patch // {}) |
+
+    # patch.parachainInfo.parachainId := pid (если есть)
     (
       if ((.genesis? // null) != null
           and (.genesis.runtimeGenesis? // null) != null
@@ -474,6 +476,8 @@ clean_dev_collators_patch() {
         .genesis.runtimeGenesis.patch.parachainInfo.parachainId = $pid
       else . end
     ) |
+
+    # patch.sudo.key := null (если есть)
     (
       if ((.genesis? // null) != null
           and (.genesis.runtimeGenesis? // null) != null
@@ -484,6 +488,8 @@ clean_dev_collators_patch() {
         .genesis.runtimeGenesis.patch.sudo.key = null
       else . end
     ) |
+
+    # config.parachainInfo.parachainId := pid (если есть)
     (
       if ((.genesis? // null) != null
           and (.genesis.runtimeGenesis? // null) != null
@@ -494,24 +500,28 @@ clean_dev_collators_patch() {
         .genesis.runtimeGenesis.config.parachainInfo.parachainId = $pid
       else . end
     ) |
-    # --- collatorSelection: ensure exists & cleared (CONFIG) ---
+
+    # ==== collatorSelection (CONFIG): создать и очистить ====
     .genesis.runtimeGenesis.config = (.genesis.runtimeGenesis.config // {}) |
     .genesis.runtimeGenesis.config.collatorSelection = {
       invulnerables: [],
       candidacyBond: $bond_str,
       desiredCandidates: 0
     } |
-    # --- also clear PATCH branches if present ---
+
+    # ==== AURA: очистка и в PATCH, и в CONFIG (если присутствуют) ====
+    # patch.aura.authorities := []
     (
       if ((.genesis? // null) != null
           and (.genesis.runtimeGenesis? // null) != null
           and (.genesis.runtimeGenesis.patch? // null) != null
-          and (.genesis.runtimeGenesis.patch.collatorSelection? // null) != null
-          and (.genesis.runtimeGenesis.patch.collatorSelection | has("invulnerables")))
+          and (.genesis.runtimeGenesis.patch.aura? // null) != null
+          and (.genesis.runtimeGenesis.patch.aura | has("authorities")))
       then
-        .genesis.runtimeGenesis.patch.collatorSelection.invulnerables = []
+        .genesis.runtimeGenesis.patch.aura.authorities = []
       else . end
     ) |
+    # config.aura.authorities := []
     (
       if ((.genesis? // null) != null
           and (.genesis.runtimeGenesis? // null) != null
@@ -522,6 +532,8 @@ clean_dev_collators_patch() {
         .genesis.runtimeGenesis.config.aura.authorities = []
       else . end
     ) |
+
+    # дублирующая защита: если config.collatorSelection уже есть, зануляем invulnerables
     (
       if ((.genesis? // null) != null
           and (.genesis.runtimeGenesis? // null) != null
@@ -532,6 +544,8 @@ clean_dev_collators_patch() {
         .genesis.runtimeGenesis.config.collatorSelection.invulnerables = []
       else . end
     ) |
+
+    # balances (CONFIG → [], PATCH → [])
     (
       if ((.genesis? // null) != null
           and (.genesis.runtimeGenesis? // null) != null
@@ -552,6 +566,8 @@ clean_dev_collators_patch() {
         .genesis.runtimeGenesis.patch.balances.balances = []
       else . end
     ) |
+
+    # session.keys (PATCH → [])
     (
       if ((.genesis? // null) != null
           and (.genesis.runtimeGenesis? // null) != null
@@ -760,6 +776,23 @@ add_dev_collators_patch() {
     )
   ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
 
+  # Mirror authorities → invulnerables (CONFIG only; preserve order)
+  tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
+  jq '
+    .genesis //= {} |
+    .genesis.runtimeGenesis //= {} |
+    .genesis.runtimeGenesis.config //= {} |
+    .genesis.runtimeGenesis.config.collatorSelection
+      = (.genesis.runtimeGenesis.config.collatorSelection // {}) |
+    (
+      if (.genesis.runtimeGenesis.patch? // {} | .aura? // {} | .authorities? // null) != null
+      then
+        .genesis.runtimeGenesis.config.collatorSelection.invulnerables
+          = (.genesis.runtimeGenesis.patch.aura.authorities)
+      else . end
+    )
+  ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
+
   # If this is the first collator being added, set Sudo key to its controller address, and mirror to config.sudo.key if it exists
   if [ "$is_first" = "true" ]; then
     tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
@@ -788,37 +821,14 @@ add_dev_collators_patch() {
     echo "Parachain Sudo key set to controller of $collator_name"
   fi
 
-  # Ensure collator is invulnerable
+  # --- ensure CONFIG.collatorSelection exists, set bond & desired (do not touch invulnerables)
   tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
-  jq --arg acc "$controller_ss58" '
-    (
-      if ((.genesis? // null) != null
-          and (.genesis.runtimeGenesis? // null) != null
-          and (.genesis.runtimeGenesis.patch? // null) != null
-          and (.genesis.runtimeGenesis.patch.collatorSelection? // null) != null
-          and (.genesis.runtimeGenesis.patch.collatorSelection | has("invulnerables")))
-      then
-        .genesis.runtimeGenesis.patch.collatorSelection.invulnerables = (
-          ((.genesis.runtimeGenesis.patch.collatorSelection.invulnerables // []) + [$acc]) | unique
-        )
-      else . end
-    )
-  ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
-
-  # --- NEW: ensure CONFIG.collatorSelection exists, add acc, set bond & desired
-  tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
-  jq --arg acc "$controller_ss58" \
-     --arg bond_str "$COLLATOR_SELECTION_BOND" '
-    .genesis = (.genesis // {}) |
-    .genesis.runtimeGenesis = (.genesis.runtimeGenesis // {}) |
-    .genesis.runtimeGenesis.config = (.genesis.runtimeGenesis.config // {}) |
+  jq --arg bond_str "$COLLATOR_SELECTION_BOND" '
+    .genesis //= {} |
+    .genesis.runtimeGenesis //= {} |
+    .genesis.runtimeGenesis.config //= {} |
     .genesis.runtimeGenesis.config.collatorSelection
       = (.genesis.runtimeGenesis.config.collatorSelection // {}) |
-    .genesis.runtimeGenesis.config.collatorSelection.invulnerables
-      = (
-        ((.genesis.runtimeGenesis.config.collatorSelection.invulnerables // [])
-          + [$acc]) | unique
-      ) |
     .genesis.runtimeGenesis.config.collatorSelection
       |= (
         .candidacyBond = $bond_str
@@ -882,22 +892,6 @@ add_dev_collators_patch() {
     )
   ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
 
-  # Sync config.collatorSelection.invulnerables if present (do not create branches)
-  tmp_out="$(mktemp "$WORKDIR/tmp.addcol.XXXXXX")"
-  jq --arg acc "$controller_ss58" '
-    (
-      if ((.genesis? // null) != null
-          and (.genesis.runtimeGenesis? // null) != null
-          and (.genesis.runtimeGenesis.config? // null) != null
-          and (.genesis.runtimeGenesis.config.collatorSelection? // null) != null
-          and (.genesis.runtimeGenesis.config.collatorSelection | has("invulnerables")))
-      then
-        .genesis.runtimeGenesis.config.collatorSelection.invulnerables = (
-          ((.genesis.runtimeGenesis.config.collatorSelection.invulnerables // []) + [$acc]) | unique
-        )
-      else . end
-    )
-  ' "$spec_path" > "$tmp_out" && mv "$tmp_out" "$spec_path"
 
   # Append bootNode for collator
   local listen_address peer_id bootnode
