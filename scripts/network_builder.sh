@@ -74,7 +74,11 @@ dbg "WORKDIR $WORKDIR created"
 # =====================
 POLKADOT_REPO="${POLKADOT_REPO:-$HOME/dev/polkadot-sdk}"
 RELAYCHAIN="${RELAYCHAIN:-westend-local}"
+
 PARA_BASE=${PARA_BASE:-2000}
+
+# Separate base for relay p2p ports (collator's embedded relay node)
+RELAY_P2P_BASE=${RELAY_P2P_BASE:-11000}
 
 # --- host bandwidth (для всех хостов)
 HOST_BW_UP="${HOST_BW_UP:-50 Mbit}"
@@ -104,7 +108,7 @@ case "$GLUTTON_COMPUTE" in (*[!0-9]*|"") echo "WARN: GLUTTON_COMPUTE must be an 
 case "$GLUTTON_BLOCK_LENGTH" in (*[!0-9]*|"") echo "WARN: GLUTTON_BLOCK_LENGTH must be an integer; defaulting to 0" >&2; GLUTTON_BLOCK_LENGTH="0";; esac
 case "$GLUTTON_TRASH_DATA_COUNT" in (*[!0-9]*|"") echo "WARN: GLUTTON_TRASH_DATA_COUNT must be an integer; defaulting to 5'120" >&2; GLUTTON_TRASH_DATA_COUNT=5120;; esac
 
-LOGCFG="${LOGCFG:-info}"
+LOGCFG="${LOGCFG:-info,aura=trace,consensus=debug}"
 
 # Ensure base toolchain
 require_cmd cargo
@@ -294,16 +298,24 @@ prepare_manifest() {
   # Port bases and computed ports
   local P2P_BASE=10000 RPC_BASE=20000 PROM_BASE=30000
   local p2p_port=$((P2P_BASE + index))
+  local p2p_port_relay=$((RELAY_P2P_BASE + index))
   local rpc_port=$((RPC_BASE + index))
   local prom_port=$((PROM_BASE + index))
-  dbg "ports: p2p=$p2p_port rpc=$rpc_port prom=$prom_port"
+  dbg "ports: p2p=$p2p_port relay_p2p=$p2p_port_relay rpc=$rpc_port prom=$prom_port"
 
   # Node key as hex (ed25519 secret) and listen address (no peer id)
   # We use the ed25519 secret hex as the libp2p node key material for dev.
   local ip_octet=$((index+1))
-  local ip_prefix
-  if [ -n "${USE_LOCALHOST:-}" ]; then ip_prefix="127.0.0"; else ip_prefix="10.0.0"; fi
-  local listen_addr="/ip4/${ip_prefix}.${ip_octet}/tcp/${p2p_port}"
+  local listen_addr
+  local listen_addr_relay
+  if [ -n "${USE_LOCALHOST:-}" ]; then
+    listen_addr="/ip4/127.0.0.1/tcp/${p2p_port}"
+    listen_addr_relay="/ip4/127.0.0.1/tcp/${p2p_port_relay}"
+  else
+    local ip_prefix="10.0.0";
+    listen_addr="/ip4/${ip_prefix}.${ip_octet}/tcp/${p2p_port}"
+    listen_addr_relay="/ip4/${ip_prefix}.${ip_octet}/tcp/${p2p_port_relay}"
+  fi
 
   # Helper to get keys
   get_key() {
@@ -342,12 +354,21 @@ prepare_manifest() {
   tmp_pair="$(get_hex_pair sr25519 "//$name//stash")"; stash_pub="${tmp_pair%% *}"; stash_sec="${tmp_pair#* }"
   dbg "hex: sr_pub=$sr_pub ed_pub=$ed_pub ec_pub=$ec_pub stash_pub=$stash_pub"
 
+  # Separate ed25519 key for relay side (so relay libp2p PeerId differs)
+  local rel_ed_pub rel_ed_sec
+  tmp_pair="$(get_hex_pair ed25519 "//$name//relay")"; rel_ed_pub="${tmp_pair%% *}"; rel_ed_sec="${tmp_pair#* }"
+
   # Derive PeerId from the ed25519 secret (hex) via stdin to polkadot (no fallbacks)
   local peer_id=""
   if command -v "$POLKADOT_BIN" >/dev/null 2>&1; then
     dbg "peerid: via polkadot key inspect-node-key (stdin)"
     peer_id="$("$POLKADOT_BIN" key inspect-node-key <<<"${ed_sec}" 2>/dev/null | tr -d '\r\n' | head -c 200)" || peer_id=""
     dbg "peerid: result='${peer_id:-}'"
+  fi
+
+  local relay_peer_id=""
+  if command -v "$POLKADOT_BIN" >/dev/null 2>&1; then
+    relay_peer_id="$("$POLKADOT_BIN" key inspect-node-key <<<"${rel_ed_sec}" 2>/dev/null | tr -d '\r\n' | head -c 200)" || relay_peer_id=""
   fi
 
   # Build session keys array with suri, public_hex, secret_hex, ss58
@@ -378,9 +399,12 @@ prepare_manifest() {
     --arg stash_ss58 "$stash_ss58" \
     --arg stash_pub "$stash_pub" \
     --arg stash_sec "$stash_sec" \
-    --arg node_key "$ed_sec" \
-    --arg listen_address "$listen_addr" \
-    --arg peer_id "$peer_id" \
+    --arg node_key_para "$ed_sec" \
+    --arg listen_addr_para "$listen_addr" \
+    --arg peer_id_para "$peer_id" \
+    --arg node_key_relay "$rel_ed_sec" \
+    --arg listen_addr_relay "$listen_addr_relay" \
+    --arg peer_id_relay "$relay_peer_id" \
     --argjson rpc_port "$rpc_port" \
     --argjson prometheus_port "$prom_port" \
     --argjson session_keys "$session_json" '
@@ -389,12 +413,25 @@ prepare_manifest() {
       controller: { scheme: "sr25519", suri: $controller_suri, ss58: $controller_ss58, public_hex: $controller_pub, secret_hex: $controller_sec },
       stash:      { scheme: "sr25519", suri: $stash_suri,      ss58: $stash_ss58,      public_hex: $stash_pub,      secret_hex: $stash_sec },
       session_keys: $session_keys,
-      node_key: $node_key,
-      listen_address: $listen_address,
-      peer_id: $peer_id,
+      # Backward-compatible flat fields (for parachain side by default)
+      node_key: $node_key_para,
+      listen_address: $listen_addr_para,
+      peer_id: $peer_id_para,
+      # Structured network section
+      network: {
+        para:  { listen_address: $listen_addr_para,  node_key: $node_key_para,  peer_id: $peer_id_para },
+        relay: { listen_address: $listen_addr_relay, node_key: $node_key_relay, peer_id: $peer_id_relay }
+      },
       rpc_port: $rpc_port,
       prometheus_port: $prometheus_port
     }' > "$node_dir/manifest.json"
+
+  # For validators, flat keys should refer to relay side (no parachain process)
+  if [[ "$name" == Validator_* ]]; then
+    jq --arg la "$listen_addr_relay" --arg nk "$rel_ed_sec" --arg pid "$relay_peer_id" '
+      .listen_address = $la | .node_key = $nk | .peer_id = $pid
+    ' "$node_dir/manifest.json" > "$node_dir/manifest.json.tmp" && mv "$node_dir/manifest.json.tmp" "$node_dir/manifest.json"
+  fi
   echo "Prepared manifest for $name (index $index): $node_dir/manifest.json"
 }
 
@@ -958,7 +995,7 @@ provision_node_keys() {
 
   # --- session keys from manifest ---
   # Mapping: babe->babe, imon->imon, audi->audi, para->para, asgn->asgn, gran->gran, beef->beef
-  local ktype_map ktype kscheme suri
+  local ktype kscheme suri
   local insert_fail=0
   while read -r key; do
     ktype="$(echo "$key" | jq -r '.type')"
@@ -1059,6 +1096,7 @@ SHADOW_TAG="$validator_name" "$POLKADOT_BIN" \\
   --base-path "$base_path" \\
   --chain "$spec_json" \\
   --listen-addr "$listen_addr" \\
+  --public-addr "$listen_addr" \\
   --node-key "$node_key_hex" \\
   --rpc-port $rpc_port \\
   --rpc-cors all \\
@@ -1076,24 +1114,38 @@ CMD
 print_collator_run_command() {
   local collator_name="$1" para_spec_json="$2"
   [ -n "$collator_name" ] && [ -n "$para_spec_json" ] && [ -f "$para_spec_json" ] || { echo "Usage: print_collator_run_command <Name> <PARACHAIN_SPEC_JSON>" >&2; return 1; }
-  local lower node_dir base_path manifest listen_addr rpc_port prom_port node_key_hex relay_spec_json
+  local lower node_dir base_path manifest relay_spec_json
   lower="$(echo "$collator_name" | tr '[:upper:]' '[:lower:]')"
   node_dir="$WORKDIR/nodes/$lower"; base_path="$node_dir/base"; manifest="$node_dir/manifest.json"
   [ -f "$WORKDIR/relaychain-raw.json" ] && relay_spec_json="$WORKDIR/relaychain-raw.json" || relay_spec_json=""
-  listen_addr="$(jq -r '.listen_address // empty' "$manifest")"
+
+  local listen_addr_para node_key_para peer_id_para
+  listen_addr_para="$(jq -r '.network.para.listen_address // .listen_address // empty' "$manifest")"
+  node_key_para="$(jq -r '.network.para.node_key     // .node_key       // empty' "$manifest")"
+
+  local listen_addr_relay node_key_relay
+  listen_addr_relay="$(jq -r '.network.relay.listen_address // empty' "$manifest")"
+  node_key_relay="$(jq -r '.network.relay.node_key       // empty' "$manifest")"
+
+  local rpc_port prom_port
   rpc_port="$(jq -r '.rpc_port // empty' "$manifest")"
   prom_port="$(jq -r '.prometheus_port // empty' "$manifest")"
-  node_key_hex="$(jq -r '.node_key // empty' "$manifest")"
-  [ -n "$listen_addr" ] && [ -n "$rpc_port" ] && [ -n "$prom_port" ] && [ -n "$node_key_hex" ] || { echo "ERROR: manifest missing listen_address/node_key/rpc_port/prometheus_port" >&2; return 1; }
+  [ -n "$listen_addr_para" ] && [ -n "$rpc_port" ] && [ -n "$prom_port" ] && [ -n "$node_key_para" ] || { echo "ERROR: manifest missing listen_address/node_key/rpc_port/prometheus_port" >&2; return 1; }
+  force_authoring=""
+  if ((COLLATORS == 1)); then
+    echo "COLLATORS=$COLLATORS"
+    force_authoring="--force-authoring"
+  fi
+
   cat <<CMD
 SHADOW_TAG="$collator_name" "$COLLATOR_BIN" \\
-  --collator \\
-  --force-authoring \\
+  --collator $force_authoring \\
   --name "$collator_name" \\
   --base-path "$base_path" \\
   --chain "$para_spec_json" \\
-  --listen-addr "$listen_addr" \\
-  --node-key "$node_key_hex" \\
+  --listen-addr "$listen_addr_para" \\
+  --public-addr "$listen_addr_para" \\
+  --node-key "$node_key_para" \\
   --rpc-port $rpc_port \\
   --rpc-cors all \\
   --rpc-methods unsafe \\
@@ -1106,6 +1158,9 @@ SHADOW_TAG="$collator_name" "$COLLATOR_BIN" \\
   -- \\
   --base-path "$base_path/../relay" \\
   --chain "$relay_spec_json" \\
+  --listen-addr "$listen_addr_relay" \\
+  --public-addr "$listen_addr_relay" \\
+  --node-key "$node_key_relay" \\
   --no-prometheus \\
   --no-mdns \\
   --no-telemetry \\
@@ -1208,6 +1263,7 @@ generate_shadow_config() {
       printf '          "--base-path", "%s",\n' "$base_path"
       printf '          "--chain", "%s",\n' "$WORKDIR/relaychain-raw.json"
       printf '          "--listen-addr", "%s",\n' "$listen_addr"
+      printf '          "--public-addr", "%s",\n' "$listen_addr"
       printf '          "--node-key", "%s",\n' "$node_key_hex"
       printf '          "--rpc-port", "%s",\n' "$rpc_port"
       printf '          "--prometheus-port", "%s",\n' "$prom_port"
@@ -1236,7 +1292,13 @@ generate_shadow_config() {
     for ((c=0; c<COLLATORS; c++)); do
       name="Collator_$((PARA_BASE+p))_$((c+1))"; lower="$(lc "$name")"; base_path="$WORKDIR/nodes/$lower/base"; manifest="$WORKDIR/nodes/$lower/manifest.json"
       [ -f "$manifest" ] || { echo "WARN: manifest missing for $name: $manifest — skipping" >&2; continue; }
-      listen_addr="$(jq -r '.listen_address // empty' "$manifest")"; rpc_port="$(jq -r '.rpc_port // empty' "$manifest")"; prom_port="$(jq -r '.prometheus_port // empty' "$manifest")"; node_key_hex="$(jq -r '.node_key // empty' "$manifest")"
+      # Load both para and relay network values
+      listen_addr="$(jq -r '.network.para.listen_address // .listen_address // empty' "$manifest")"
+      rpc_port="$(jq -r '.rpc_port // empty' "$manifest")"
+      prom_port="$(jq -r '.prometheus_port // empty' "$manifest")"
+      node_key_hex="$(jq -r '.network.para.node_key // .node_key // empty' "$manifest")"
+      relay_listen_addr="$(jq -r '.network.relay.listen_address // empty' "$manifest")"
+      relay_node_key_hex="$(jq -r '.network.relay.node_key // empty' "$manifest")"
       host="$name"; host_key="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | tr '_' '-')"
       {
         printf '  %s:\n' "$host_key"
@@ -1246,11 +1308,14 @@ generate_shadow_config() {
         printf '      - path: %s\n' "$COLLATOR_BIN"
         printf '        args: [\n'
         printf '          "--collator",\n'
-        printf '          "--force-authoring",\n'
+        if ((COLLATORS == 1)); then
+          printf '          "--force-authoring",\n'
+        fi
         printf '          "--name", "%s",\n' "$name"
         printf '          "--base-path", "%s",\n' "$base_path"
         printf '          "--chain", "%s",\n' "$para_raw"
         printf '          "--listen-addr", "%s",\n' "$listen_addr"
+        printf '          "--public-addr", "%s",\n' "$listen_addr"
         printf '          "--node-key", "%s",\n' "$node_key_hex"
         printf '          "--rpc-port", "%s",\n' "$rpc_port"
         printf '          "--prometheus-port", "%s",\n' "$prom_port"
@@ -1262,6 +1327,9 @@ generate_shadow_config() {
         printf '          "--",\n'
         printf '          "--base-path", "%s/../relay",\n' "$base_path"
         printf '          "--chain", "%s",\n' "$relay_spec_json"
+        printf '          "--listen-addr", "%s",\n' "$relay_listen_addr"
+        printf '          "--public-addr", "%s",\n' "$relay_listen_addr"
+        printf '          "--node-key", "%s",\n' "$relay_node_key_hex"
         printf '          "--no-prometheus",\n'
         printf '          "--no-mdns",\n'
         printf '          "--no-telemetry",\n'
