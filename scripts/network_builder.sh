@@ -108,7 +108,7 @@ case "$GLUTTON_COMPUTE" in (*[!0-9]*|"") echo "WARN: GLUTTON_COMPUTE must be an 
 case "$GLUTTON_BLOCK_LENGTH" in (*[!0-9]*|"") echo "WARN: GLUTTON_BLOCK_LENGTH must be an integer; defaulting to 0" >&2; GLUTTON_BLOCK_LENGTH="0";; esac
 case "$GLUTTON_TRASH_DATA_COUNT" in (*[!0-9]*|"") echo "WARN: GLUTTON_TRASH_DATA_COUNT must be an integer; defaulting to 5'120" >&2; GLUTTON_TRASH_DATA_COUNT=5120;; esac
 
-LOGCFG="${LOGCFG:-info,aura=trace,consensus=debug}"
+LOGCFG="${LOGCFG:-info}"
 
 # Ensure base toolchain
 require_cmd cargo
