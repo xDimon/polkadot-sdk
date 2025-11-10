@@ -84,6 +84,14 @@ RELAY_P2P_BASE=${RELAY_P2P_BASE:-11000}
 HOST_BW_UP="${HOST_BW_UP:-50 Mbit}"
 HOST_BW_DOWN="${HOST_BW_DOWN:-50 Mbit}"
 
+# --- Shadow network defaults
+# End-to-end link latency used for all edges in the Shadow graph
+SHADOW_LATENCY="${SHADOW_LATENCY:-1 ms}"
+# If > 0, the collator with this 1-based index in *each* parachain
+# will be isolated from the other collators of the same parachain
+# (packet_loss=1.0 for those edges only). Edges to validators stay intact.
+ISOLATE_COLLATOR_IDX="${ISOLATE_COLLATOR_IDX:-0}"
+
 # --- collatorSelection defaults (можно переопределить окружением)
 COLLATOR_SELECTION_BOND="${COLLATOR_SELECTION_BOND:-0}"
 # Если задать COLLATOR_SELECTION_DESIRED, будет использоваться оно,
@@ -1184,15 +1192,30 @@ generate_shadow_config() {
   local out="$WORKDIR/shadow.yaml"
   mkdir -p -- "$WORKDIR"
 
-  local host_labels=() name lower node_dir manifest
+  local host_labels=() host_types=() host_para_ids=() host_coll_idxs=()
+  local name lower node_dir manifest
   for ((v=0; v<VALIDATORS; v++)); do
     name="Validator_$((v+1))"; lower="$(lc "$name")"; manifest="$WORKDIR/nodes/$lower/manifest.json"
-    [ -f "$manifest" ] && host_labels+=("$name") || echo "WARN: manifest missing for $name: $manifest — skipping" >&2
+    if [ -f "$manifest" ]; then
+      host_labels+=("$name")
+      host_types+=("validator")
+      host_para_ids+=(0)
+      host_coll_idxs+=(0)
+    else
+      echo "WARN: manifest missing for $name: $manifest — skipping" >&2
+    fi
   done
   for ((p=0; p<PARACHAINS; p++)); do
     for ((c=0; c<COLLATORS; c++)); do
       name="Collator_$((PARA_BASE+p))_$((c+1))"; lower="$(lc "$name")"; manifest="$WORKDIR/nodes/$lower/manifest.json"
-      [ -f "$manifest" ] && host_labels+=("$name") || echo "WARN: manifest missing for $name: $manifest — skipping" >&2
+      if [ -f "$manifest" ]; then
+        host_labels+=("$name")
+        host_types+=("collator")
+        host_para_ids+=("$((PARA_BASE+p))")
+        host_coll_idxs+=("$((c+1))")
+      else
+        echo "WARN: manifest missing for $name: $manifest — skipping" >&2
+      fi
     done
   done
   local total_hosts="${#host_labels[@]}"
@@ -1225,15 +1248,36 @@ generate_shadow_config() {
       printf '        ]\n'
     done
     for ((i=1; i<=total_hosts; i++)); do
-      printf '        edge [\n'; printf '          source %d\n' "$i"; printf '          target %d\n' "$i"; printf '          latency "1 ms"\n'; printf '          packet_loss 0.0\n'; printf '        ]\n'
+      printf '        edge [\n'
+      printf '          source %d\n' "$i"
+      printf '          target %d\n' "$i"
+      printf '          latency "%s"\n' "$SHADOW_LATENCY"
+      printf '          packet_loss 0.0\n'
+      printf '        ]\n'
     done
     for ((i=1; i<=total_hosts; i++)); do
       for ((j=i+1; j<=total_hosts; j++)); do
+        # Default packet loss for all links
+        pl="0.0"
+        if [ "${ISOLATE_COLLATOR_IDX:-0}" -gt 0 ]; then
+          # Arrays are 0-based; graph ids are 1-based
+          ii=$((i-1)); jj=$((j-1))
+          ti="${host_types[$ii]}"; tj="${host_types[$jj]}"
+          if [ "$ti" = "collator" ] && [ "$tj" = "collator" ]; then
+            pi="${host_para_ids[$ii]}"; pj="${host_para_ids[$jj]}"
+            if [ "$pi" -eq "$pj" ]; then
+              ci="${host_coll_idxs[$ii]}"; cj="${host_coll_idxs[$jj]}"
+              if [ "$ci" -ne "$cj" ] && { [ "$ci" -eq "$ISOLATE_COLLATOR_IDX" ] || [ "$cj" -eq "$ISOLATE_COLLATOR_IDX" ]; }; then
+                pl="1.0"
+              fi
+            fi
+          fi
+        fi
         printf '        edge [\n'
         printf '          source %d\n' "$i"
         printf '          target %d\n' "$j"
-        printf '          latency "1 ms"\n'
-        printf '          packet_loss 0.0\n'
+        printf '          latency "%s"\n' "$SHADOW_LATENCY"
+        printf '          packet_loss %s\n' "$pl"
         printf '        ]\n'
       done
     done
