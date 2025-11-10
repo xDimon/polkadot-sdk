@@ -81,8 +81,9 @@ PARA_BASE=${PARA_BASE:-2000}
 RELAY_P2P_BASE=${RELAY_P2P_BASE:-11000}
 
 # --- host bandwidth (для всех хостов)
-HOST_BW_UP="${HOST_BW_UP:-50 Mbit}"
-HOST_BW_DOWN="${HOST_BW_DOWN:-50 Mbit}"
+HOST_BW="${HOST_BW:-50 Mbit}"
+HOST_BW_UP="${HOST_BW_UP:-${HOST_BW}}"
+HOST_BW_DOWN="${HOST_BW_DOWN:-${HOST_BW}}"
 
 # --- Shadow network defaults
 # End-to-end link latency used for all edges in the Shadow graph
