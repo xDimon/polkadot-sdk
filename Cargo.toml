@@ -1577,6 +1577,5 @@ yamux = { opt-level = 3 }
 zeroize = { opt-level = 3 }
 
 [patch.crates-io]
-litep2p = { git = "https://github.com/xDimon/litep2p.git", rev = "e44ab69084ff04f15a34b73866dbeeeac9ff06ec" }
-kvdb-rocksdb = { git = "https://github.com/xDimon/parity-common", branch = "master" }
-kvdb = { git = "https://github.com/xDimon/parity-common", branch = "master" }
+kvdb-rocksdb = { git = "https://github.com/xDimon/parity-common", branch = "xDimon/shadow_simulation_support" }
+kvdb = { git = "https://github.com/xDimon/parity-common", branch = "xDimon/shadow_simulation_support" }
